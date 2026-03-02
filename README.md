@@ -164,37 +164,61 @@ SONDA produces a structured JSON with predictable field schemas per node role:
 
 ```json
 {
-  "metadata": {
-    "cluster": "mainnet-beta",
-    "timestamp": "2026-02-28T17:52:01Z",
-    "epoch": 933,
-    "version": "3.5.1"
-  },
+  "timestamp": "2026-03-02T18:21:14.432854+00:00",
+  "cluster": "mainnet-beta",
+  "epoch": 934,
+  "slot": 403773442,
+  "epoch_completed_percent": 66.07453703703705,
   "record_counts": {
-    "validator": 580, "validator-hidden": 191,
-    "rpc": 65, "dz-device": 95, "co-hosted": 2,
-    "jito-block-engine": 12, "unknown-node": 4049
-  },
-  "metrics": {
-    "overall": { "nakamoto_country": 6, "hhi_country": 2841, "gini": 0.87, "..." : "..." },
-    "doublezero": { "validators": 412, "multicast_groups": ["..."] },
-    "bam": { "stake_percentage": 27.0, "ibrl_aggregates": { "by_country": "..." } },
-    "rakurai": { "total_validators": 17, "stake_percent": 1.86 }
+    "validator": 773, "validator-hidden": 3, "validator-inactive": 27,
+    "backup-node": 0, "rpc": 204, "co-hosted": 2, "unknown-node": 3986,
+    "dz-device": 95, "jito-block-engine": 36, "jito-shred-receiver": 8,
+    "jito-ntp": 8, "jito-bam": 12, "harmonic-auction": 6,
+    "harmonic-tpu-relayer": 6, "harmonic-shred-receiver": 6, "harmonic-bundles": 6,
+    "solana-rpc-official": 1, "solana-entrypoint": 5
   },
   "records": [
     {
       "identity_pubkey": "...",
       "role": "validator",
+      "ip_address": "1.2.3.4",
+      .....
       "geolocation": {
         "country_code": "US", "city": "Ashburn",
         "confidence": "high", "discrepancy": false,
         "primary_source": "dbip"
       },
+      .....
+      "is_rakurai": true,
       "bam_node": "ny-mainnet-bam-1-tee",
-      "ibrl": { "ibrl_score": 97.2, "median_block_build_ms": 142 },
-      "is_rakurai": true
+      "ibrl": { "ibrl_score": 97.2, "median_block_build_ms": 362 },
+      "dz_connected": true, "dz_device_name": "frankry", "dz_location": "Frankfurt"
     }
-  ]
+  ],
+  "metrics": {
+    "overall": {
+      "total": 5154,
+      "unique_ips": 5131,
+      "country_distribution": { ... },
+      "asn_distribution": { ... },
+      "city_distribution": { ... },
+      },
+  "validators": {
+      "total": 773,
+      "unique_ips": 773,
+      "country_distribution": { ... },
+      .....
+  "decentralization": {
+      "methodology": { ... },
+      "current": { ... },
+      },
+    "rpc": { ... },
+    "endpoints": { ... },
+    "doublezero": { ... },
+    "bam": { ... },
+    "rakurai": { ... },
+    "cluster_health": { ... }
+  }
 }
 ```
 
