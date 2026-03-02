@@ -202,16 +202,17 @@ SONDA produces a structured JSON with predictable field schemas per node role:
       "country_distribution": { ... },
       "asn_distribution": { ... },
       "city_distribution": { ... },
-      },
-  "validators": {
+    },
+    "validators": {
       "total": 773,
       "unique_ips": 773,
       "country_distribution": { ... },
       .....
-  "decentralization": {
-      "methodology": { ... },
-      "current": { ... },
-      },
+      "decentralization": {
+        "methodology": { ... },
+        "current": { ... },
+      }
+    },
     "rpc": { ... },
     "endpoints": { ... },
     "doublezero": { ... },
