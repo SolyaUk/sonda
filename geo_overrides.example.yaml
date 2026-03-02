@@ -1,0 +1,24 @@
+# SONDA Geo Overrides
+# =====================
+# This file is auto-generated from DoubleZero device locations (protocol-verified)
+# and can include manual admin overrides for mislocated carrier IPs.
+#
+# Auto entries (source: doublezero-verified) are refreshed each run.
+# Admin entries (source: admin-override) are never deleted automatically.
+#
+# How it works:
+#   Override -> find geo source matching city/country -> switch primary_source
+#   -> update ALL fields (country, city, region, lat/lon, ASN)
+#
+# Admin override with explicit country_code:
+#   - ip: "185.1.2.3"
+#     country_code: US
+#     city: Chicago
+#     source: admin-override
+#     note: "Verified via traceroute 2026-02-20"
+
+overrides:
+- ip: 1.2.3.4
+  city: Tokyo
+  source: doublezero-verified
+  dz_device_name: tyo001-dz002

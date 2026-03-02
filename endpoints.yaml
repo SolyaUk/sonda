@@ -1,0 +1,172 @@
+# =============================================================================
+# Solana Ecosystem Endpoints Configuration
+# =============================================================================
+# This file defines all known infrastructure endpoints in the Solana ecosystem.
+# Endpoints are organized by provider → cluster → service type → location.
+#
+# Values can be:
+#   - Domain names (resolved via DNS at runtime)
+#   - Direct IP:port strings (IP extracted, port stored as metadata)
+#   - Dict with {ip: ..., bam_id: ...} for BAM API mapping
+#
+# BAM endpoints use bam_id to match against explorer.bam.dev/api/v1/nodes
+# for reachability verification via API instead of TCP/HTTP checks.
+#
+# To add a new endpoint: simply add a new line under the appropriate section.
+# To add a new provider: create a new top-level block following the same pattern.
+#
+# Last verified: 2026-02-25
+# =============================================================================
+
+jito:
+  mainnet:
+    block-engine:
+      amsterdam: amsterdam.mainnet.block-engine.jito.wtf
+      dublin: dublin.mainnet.block-engine.jito.wtf
+      frankfurt: frankfurt.mainnet.block-engine.jito.wtf
+      london: london.mainnet.block-engine.jito.wtf
+      new-york: ny.mainnet.block-engine.jito.wtf
+      salt-lake-city: slc.mainnet.block-engine.jito.wtf
+      singapore: singapore.mainnet.block-engine.jito.wtf
+      tokyo: tokyo.mainnet.block-engine.jito.wtf
+
+    shred-receiver:
+      amsterdam: "74.118.140.240:1002"
+      dublin: "64.130.61.8:1002"
+      frankfurt: "64.130.50.14:1002"
+      london: "142.91.127.175:1002"
+      new-york: "141.98.216.96:1002"
+      salt-lake-city: "64.130.53.8:1002"
+      singapore: "202.8.11.224:1002"
+      tokyo: "202.8.9.160:1002"
+
+    ntp:
+      # NTP server domains — verify mappings if Jito updates docs
+      amsterdam: ntp.amsterdam.jito.wtf
+      dublin: ntp.dublin.jito.wtf
+      frankfurt: ntp.frankfurt.jito.wtf
+      london: ntp.london.jito.wtf
+      dallas: ntp.dallas.jito.wtf
+      salt-lake-city: ntp.slc.jito.wtf
+      singapore: ntp.singapore.jito.wtf
+      tokyo: ntp.tokyo.jito.wtf
+
+    bam:
+      # bam_id maps to "bam_node" field in explorer.bam.dev/api/v1/nodes
+      # Reachability checked via API (connected_validators > 0), not TCP/HTTP
+      amsterdam-bampc:
+        ip: mainnet.bam.jito.wtf
+        bam_id: lucas-turin-devbox-1-tee
+      amsterdam:
+        ip: amsterdam.mainnet.bam.jito.wtf
+        bam_id: amsterdam-mainnet-bam-2-tee
+      dublin:
+        ip: dublin.mainnet.bam.jito.wtf
+        bam_id: dublin-mainnet-bam-1-tee
+      dallas:
+        ip: dallas.mainnet.bam.jito.wtf
+        bam_id: dallas-mainnet-bam-1-tee
+      frankfurt:
+        ip: frankfurt.mainnet.bam.jito.wtf
+        bam_id: frankfurt-mainnet-bam-1-tee
+      london:
+        ip: london.mainnet.bam.jito.wtf
+        bam_id: london-mainnet-bam-1-tee
+      los-angeles:
+        ip: lax.mainnet.bam.jito.wtf
+        bam_id: lax-mainnet-bam-1-tee
+      new-york:
+        ip: ny.mainnet.bam.jito.wtf
+        bam_id: ny-mainnet-bam-1-tee
+      pittsburgh:
+        ip: pittsburgh.mainnet.bam.jito.wtf
+        bam_id: pittsburgh-mainnet-bam-1-tee
+      salt-lake-city:
+        ip: slc.mainnet.bam.jito.wtf
+        bam_id: slc-mainnet-bam-1-tee
+      singapore:
+        ip: singapore.mainnet.bam.jito.wtf
+        bam_id: singapore-mainnet-bam-1-tee
+      tokyo:
+        ip: tokyo.mainnet.bam.jito.wtf
+        bam_id: tokyo-mainnet-bam-1-tee
+
+  testnet:
+    block-engine:
+      dallas: dallas.testnet.block-engine.jito.wtf
+      new-york: ny.testnet.block-engine.jito.wtf
+
+    shred-receiver:
+      dallas: "141.98.218.12:1002"
+      new-york: "64.130.35.224:1002"
+
+    bam:
+      dallas: dallas.testnet.bam.jito.wtf
+      new-york: ny.testnet.bam.jito.wtf
+      salt-lake-city: slc.testnet.bam.jito.wtf
+
+harmonic:
+  mainnet:
+    auction:
+      amsterdam: ams.auction.harmonic.gg
+      newark: ewr.auction.harmonic.gg
+      frankfurt: fra.auction.harmonic.gg
+      london: lon.auction.harmonic.gg
+      tokyo: tyo.auction.harmonic.gg
+      singapore: sgp.auction.harmonic.gg
+
+    tpu-relayer:
+      amsterdam: ams.tpu.harmonic.gg
+      newark: ewr.tpu.harmonic.gg
+      frankfurt: fra.tpu.harmonic.gg
+      london: lon.tpu.harmonic.gg
+      tokyo: tyo.tpu.harmonic.gg
+      singapore: sgp.tpu.harmonic.gg
+
+    shred-receiver:
+      amsterdam: "64.130.42.138:8001"
+      newark: "198.73.57.238:8001"
+      frankfurt: "64.130.32.204:8001"
+      london: "64.130.63.16:8001"
+      tokyo: "63.254.162.99:8001"
+      singapore: "198.13.130.228:8001"
+
+    bundles:
+      frankfurt: fra.be.harmonic.gg
+      london: lon.be.harmonic.gg
+      amsterdam: ams.be.harmonic.gg
+      newark: ewr.be.harmonic.gg
+      tokyo: tyo.be.harmonic.gg
+      singapore: sgp.be.harmonic.gg
+
+solana:
+  mainnet:
+    rpc-official:
+      mainnet: api.mainnet-beta.solana.com
+
+    entrypoint:
+      entrypoint-1: entrypoint.mainnet-beta.solana.com
+      entrypoint-2: entrypoint2.mainnet-beta.solana.com
+      entrypoint-3: entrypoint3.mainnet-beta.solana.com
+      entrypoint-4: entrypoint4.mainnet-beta.solana.com
+      entrypoint-5: entrypoint5.mainnet-beta.solana.com
+
+  testnet:
+    rpc-official:
+      testnet: api.testnet.solana.com
+
+    entrypoint:
+      entrypoint-1: entrypoint.testnet.solana.com
+      entrypoint-2: entrypoint2.testnet.solana.com
+      entrypoint-3: entrypoint3.testnet.solana.com
+
+  devnet:
+    rpc-official:
+      devnet: api.devnet.solana.com
+
+    entrypoint:
+      entrypoint-1: entrypoint.devnet.solana.com
+      entrypoint-2: entrypoint2.devnet.solana.com
+      entrypoint-3: entrypoint3.devnet.solana.com
+      entrypoint-4: entrypoint4.devnet.solana.com
+      entrypoint-5: entrypoint5.devnet.solana.com

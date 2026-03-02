@@ -1,0 +1,226 @@
+# SONDA
+
+**Solana Observatory for Network Decentralization Analysis**
+
+> Multi-source geo-verified analysis of validator distribution, infrastructure mapping, and network health metrics for the Solana blockchain.
+
+[![Status](https://img.shields.io/badge/status-work_in_progress-yellow)]()
+[![Python](https://img.shields.io/badge/python-3.10+-blue)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+🌐 Dashboard (coming soon): [sonda.network](https://sonda.network)
+
+> [!NOTE]
+> SONDA is under active development. The core analyzer is production-ready and tested on mainnet.
+> The public dashboard and automation layer are coming next.
+
+---
+
+## Why SONDA?
+
+Solana has dozens of dashboards. Most pull data from a single source and display it as-is. **SONDA takes a fundamentally different approach:**
+
+- **Cross-verified geolocation.** Every IP is checked against 4 independent geo providers (DB-IP, IPInfo, GeoJS, ip-api). Discrepancies are detected, logged, and resolved — not silently averaged. Protocol-verified locations from DoubleZero devices serve as ground truth.
+
+- **Complete infrastructure mapping.** Not just validators. SONDA maps the full network topology: RPC nodes, DoubleZero devices, BAM nodes, Jito block engines, Harmonic auction engines, NTP servers, shred receivers, co-hosted nodes, and more — each with their own role classification and field schema.
+
+- **Multi-dimensional decentralization metrics.** Nakamoto coefficient alone doesn't tell the full story. SONDA computes Nakamoto, HHI, Gini, and Shannon entropy across 4 dimensions simultaneously (country, ASN, city, validator) — revealing concentration patterns that single-metric tools miss entirely.
+
+- **MEV ecosystem visibility.** BAM (Block Auction Marketplace) integration with IBRL performance scores, Rakurai validator detection, Jito infrastructure mapping — showing who builds blocks, how fast, and where.
+
+---
+
+## What SONDA Analyzes
+
+### Network Nodes (~5,000+ per scan)
+
+| Category | Description |
+|---|---|
+| Validators | Active, hidden (no gossip), inactive (delinquent) |
+| RPC Nodes | Public RPC endpoints in gossip |
+| DoubleZero | DZ devices, connected validators, multicast groups |
+| BAM/Jito | Block engines, shred receivers, NTP servers, BAM nodes |
+| Harmonic | Auction engines, TPU relayers, bundles |
+| Infrastructure | Entrypoints, co-hosted nodes, backup nodes |
+
+### Geolocation (4-source cross-verification)
+
+```
+DB-IP (primary) ──→ IPInfo ──→ GeoJS ──→ ip-api (discrepancies only)
+                                              │
+                              DoubleZero ─────┘ (protocol-verified ground truth)
+```
+
+Each IP receives a confidence score (high/medium/low) based on source agreement. Discrepancies are preserved with full alternatives for audit. Geo overrides from DZ devices automatically correct mislocated carrier IPs.
+
+### Decentralization Metrics
+
+| Metric | Dimensions | What it reveals |
+|---|---|---|
+| **Nakamoto Coefficient** | Country, ASN, City, Validator | Minimum entities to control 33% of stake |
+| **Superminority** | Country, ASN, Validator (at 33/50/66%) | Geographic and organizational concentration thresholds |
+| **HHI** | Country, ASN, Validator | Market concentration (competitive vs monopolistic) |
+| **Gini Coefficient** | Validators | Stake inequality distribution |
+| **Shannon Entropy** | Country, ASN, Validator | Diversity and evenness of distribution |
+
+### Infrastructure Intelligence
+
+| Source | Data |
+|---|---|
+| **DoubleZero** | Device locations, validator connections, multicast groups (9 groups) |
+| **BAM** | Node topology, validator mapping, IBRL performance scores, stake % |
+| **Rakurai** | MEV-optimized validator detection, geo distribution |
+| **Trillium** | Client types, vote latency, slot duration, SFDP status |
+| **Endpoints** | 90+ infrastructure endpoints with differentiated reachability checks |
+
+---
+
+## Architecture
+
+```
+solana_analyzer.py          Single-file analyzer (~1,900 lines)
+├── Data Collection         Gossip, validators, epoch from Solana CLI
+├── External APIs           Trillium, BAM, Rakurai, DoubleZero CLI
+├── Geolocation Engine      4-source with adaptive TTL cache (SQLite)
+├── Geo Overrides           DZ-verified locations + admin overrides
+├── API Cache               Per-source TTL (2min → 4hr) in SQLite
+├── Metrics Calculator      Nakamoto, HHI, Gini, Shannon, Superminority
+├── Infrastructure Map      BAM nodes, IBRL, DZ multicast, Rakurai
+└── JSON Export             Structured output (~5.6 MB per scan)
+
+endpoints.yaml              Infrastructure endpoint configuration
+geo_overrides.yaml          Auto-generated DZ overrides + admin entries
+```
+
+### API Cache TTL Strategy
+
+Not all data changes at the same rate. SONDA caches intelligently:
+
+| Source | TTL | Rationale |
+|---|---|---|
+| Gossip, Validators, Epoch | Always fresh | Core monitoring — never cached |
+| DZ devices, users, multicast | 2 min | Real-time infrastructure awareness |
+| BAM validators, nodes | 2 min | Fast-changing connections |
+| Trillium | 30 min | Updates several times per epoch |
+| Rakurai | 1 hour | Validator list changes slowly |
+| BAM IBRL, stake | 1 hour | Calculated per epoch |
+| validator-info | 4 hours | On-chain, rarely changes |
+| Geolocation | 7–30 days | Separate SQLite DB, adaptive TTL |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.10+
+- Solana CLI (`solana` in PATH)
+- Optional: `doublezero` CLI (for DZ data), `ntplib` (for NTP checks)
+
+### Installation
+
+```bash
+git clone https://github.com/SolyaUk/sonda.git
+cd sonda
+
+pip install requests pyyaml ntplib
+```
+
+### Usage
+
+```bash
+# Basic analysis (mainnet)
+python solana_analyzer.py \
+  --dbip-key YOUR_DBIP_KEY \
+  --ipinfo-token YOUR_IPINFO_TOKEN \
+  --endpoints endpoints.yaml \
+  --geo-overrides geo_overrides.yaml \
+  --export --output analysis.json
+
+# Custom RPC endpoint
+python solana_analyzer.py \
+  --rpc-url https://your-rpc.com \
+  --dbip-key YOUR_KEY \
+  --export --output analysis.json
+
+# Testnet / Devnet
+python solana_analyzer.py --cluster testnet --export
+```
+
+### API Keys
+
+| Service | Required | Free Tier |
+|---|---|---|
+| [DB-IP](https://db-ip.com/) | Yes (primary geo) | 10K lookups/month |
+| [IPInfo](https://ipinfo.io/) | Recommended | 50K lookups/month |
+| GeoJS | Auto (no key) | Unlimited |
+| ip-api | Auto (discrepancies) | 45 req/min |
+
+---
+
+## Output Format
+
+SONDA produces a structured JSON with predictable field schemas per node role:
+
+```json
+{
+  "metadata": {
+    "cluster": "mainnet-beta",
+    "timestamp": "2026-02-28T17:52:01Z",
+    "epoch": 933,
+    "version": "3.5.1"
+  },
+  "record_counts": {
+    "validator": 580, "validator-hidden": 191,
+    "rpc": 65, "dz-device": 95, "co-hosted": 2,
+    "jito-block-engine": 12, "unknown-node": 4049
+  },
+  "metrics": {
+    "overall": { "nakamoto_country": 6, "hhi_country": 2841, "gini": 0.87, "..." : "..." },
+    "doublezero": { "validators": 412, "multicast_groups": ["..."] },
+    "bam": { "stake_percentage": 27.0, "ibrl_aggregates": { "by_country": "..." } },
+    "rakurai": { "total_validators": 17, "stake_percent": 1.86 }
+  },
+  "records": [
+    {
+      "identity_pubkey": "...",
+      "role": "validator",
+      "geolocation": {
+        "country_code": "US", "city": "Ashburn",
+        "confidence": "high", "discrepancy": false,
+        "primary_source": "dbip"
+      },
+      "bam_node": "ny-mainnet-bam-1-tee",
+      "ibrl": { "ibrl_score": 97.2, "median_block_build_ms": 142 },
+      "is_rakurai": true
+    }
+  ]
+}
+```
+
+---
+
+## Roadmap
+
+- [x] **Core Analyzer** — Multi-source geolocation, role classification, metrics engine
+- [x] **Infrastructure Mapping** — BAM, DoubleZero, Rakurai, Jito, Harmonic
+- [x] **API Cache** — SQLite with per-source TTL strategy
+- [x] **Geo Overrides** — DZ-verified + admin overrides with full audit trail
+- [ ] **Automation** — Cron scheduling, snapshot history, failure monitoring
+- [ ] **Public Dashboard** — Interactive visualization at [sonda.network](https://sonda.network)
+- [ ] **Historical Analysis** — Trend tracking, epoch-over-epoch comparisons
+- [ ] **Multi-chain** — Extending beyond Solana
+
+---
+
+## Built By
+
+Created by **[Solya Validator](https://solya.studio)** — an independent Solana validator committed to network health, transparency, and decentralization.
+
+Identity: [`HwcVgFSgmfeeF7zGFUBLoVA8Hpx8rtwyfCrJ1npBaSVC`](https://stakewiz.com/validator/HwcVgFSgmfeeF7zGFUBLoVA8Hpx8rtwyfCrJ1npBaSVC)
+
+---
+
+## License
+
+[MIT](LICENSE)
