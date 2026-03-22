@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.5.1
+Solana Network Decentralization Analyzer v3.6
 ==============================================
-Changes from v3.5:
-- Geo override fix: updates ALL fields (country name, region, lat/lon) when switching primary
-  DZ auto overrides: skip if no discrepancy (city diff with same country = OK)
-  Expanded alternatives: include region, latitude, longitude for proper switching
-- Rakurai API integration (api.rakurai.io):
-  is_rakurai flag on validators, rakurai metrics with geo distribution
-- DZ TTL reduced to 2min (core monitoring)
-- geo_overrides.yaml: removed country_code: null entries
-Previous (v3.5): API cache, geo_overrides, DZ multicast groups
+Changes from v3.5.1:
+- DoubleZero data migration: CLI -> Malbec HTTP API (data.malbeclabs.com)
+  with CLI fallback for graceful degradation
+- New: dz_connection_type (ibrl / multicast / ibrl+multicast) per validator
+- New: dz_multicast_publisher flag + dz_multicast_groups list per validator
+  (bebop, corvus, jito-shredstream publisher detection via node_pubkey + IP)
+- New: DZ network health telemetry (device + link status, issues detection)
+  via doublezero.xyz/api/network_health/v1
+- New: DZ contributors list (infrastructure operator analysis)
+- New: dz_metro_code, dz_contributor fields
+- Multicast metrics: connection_types breakdown, publisher stake %
+- DZ metrics: contributors summary, network_health block
+Previous (v3.5.1): Geo override fix, Rakurai, DZ TTL 2min
 """
 
 import json
@@ -66,6 +70,13 @@ BAM_API_RETRIES = 2
 
 RAKURAI_API_BASE = "https://api.rakurai.io/api/v1"
 RAKURAI_API_TIMEOUT = 10
+
+MALBEC_API_BASE = "https://data.malbeclabs.com/api/dz"
+MALBEC_API_TIMEOUT = 15
+MALBEC_PAGE_SIZE = 100   # max items per page for paginated endpoints
+
+DZ_HEALTH_API_BASE = "https://doublezero.xyz/api/network_health/v1"
+DZ_HEALTH_API_TIMEOUT = 10
 
 CLUSTER_URLS = {
     "mainnet-beta": "https://api.mainnet-beta.solana.com",
@@ -235,6 +246,11 @@ class NodeInfo:
     dz_device_name: Optional[str] = None
     dz_location: Optional[str] = None
     dz_exchange: Optional[str] = None
+    dz_connection_type: Optional[str] = None        # "ibrl", "multicast", "ibrl+multicast"
+    dz_multicast_publisher: Optional[bool] = None   # True if publishing shreds
+    dz_multicast_groups: Optional[List[str]] = None  # ["bebop", "corvus"]
+    dz_metro_code: Optional[str] = None             # "fra", "sao", "nyc"
+    dz_contributor: Optional[str] = None            # device contributor (for dz-device role)
     # BAM (Jito Block Auction Marketplace)
     bam_node: Optional[str] = None
     bam_region: Optional[str] = None
@@ -301,12 +317,77 @@ def resolve_dns(domain):
         return []
 
 
+def _format_bandwidth(val):
+    """Format bandwidth: int (bps) → human string, pass through strings."""
+    if val is None: return None
+    if isinstance(val, str): return val  # Already formatted (CLI data)
+    if isinstance(val, (int, float)):
+        if val >= 1_000_000_000: return f"{val/1_000_000_000:.0f}Gbps"
+        if val >= 1_000_000: return f"{val/1_000_000:.0f}Mbps"
+        if val >= 1_000: return f"{val/1_000:.0f}Kbps"
+        return f"{val:.0f}bps"
+    return str(val)
+
+
 def parse_ip_port(value):
     if ":" in value:
         parts = value.rsplit(":", 1)
         try: return parts[0], int(parts[1])
         except ValueError: pass
     return value, None
+
+
+def _fetch_malbec_paginated(path, params=None, max_pages=20):
+    """Fetch all pages from Malbec API (data.malbeclabs.com).
+    Returns list of items or None on failure."""
+    all_items = []
+    offset = 0
+    for page in range(max_pages):
+        try:
+            p = {"limit": MALBEC_PAGE_SIZE, "offset": offset}
+            if params: p.update(params)
+            r = requests.get(f"{MALBEC_API_BASE}/{path}", params=p, timeout=MALBEC_API_TIMEOUT)
+            if r.status_code == 403:
+                logger.warning(f"  ⚠️  Malbec API blocked (403) for {path}"); return None
+            if r.status_code != 200:
+                logger.warning(f"  ⚠️  Malbec API HTTP {r.status_code} for {path}"); return None
+            data = r.json()
+            items = data.get("items", data if isinstance(data, list) else [])
+            all_items.extend(items)
+            total = data.get("total", len(items))
+            if offset + MALBEC_PAGE_SIZE >= total: break
+            offset += MALBEC_PAGE_SIZE
+        except requests.RequestException as e:
+            logger.warning(f"  ⚠️  Malbec API error for {path}: {e}"); return None
+        except Exception as e:
+            logger.warning(f"  ⚠️  Malbec API parse error for {path}: {e}"); return None
+    return all_items
+
+
+def _fetch_malbec_single(path, timeout=MALBEC_API_TIMEOUT):
+    """Fetch single non-paginated endpoint from Malbec API. Returns parsed JSON or None."""
+    try:
+        r = requests.get(f"{MALBEC_API_BASE}/{path}", timeout=timeout)
+        if r.status_code == 403:
+            logger.warning(f"  ⚠️  Malbec API blocked (403) for {path}"); return None
+        if r.status_code != 200:
+            logger.warning(f"  ⚠️  Malbec API HTTP {r.status_code} for {path}"); return None
+        return r.json()
+    except Exception as e:
+        logger.warning(f"  ⚠️  Malbec API error for {path}: {e}"); return None
+
+
+def _fetch_dz_health_api(endpoint, network="mainnet"):
+    """Fetch DZ network health API. Returns data array or None."""
+    try:
+        r = requests.get(f"{DZ_HEALTH_API_BASE}/{endpoint}", params={"network": network},
+                        timeout=DZ_HEALTH_API_TIMEOUT)
+        if r.status_code != 200: return None
+        data = r.json()
+        if data.get("success"): return data.get("data", [])
+        return None
+    except Exception as e:
+        logger.warning(f"  ⚠️  DZ health API error: {e}"); return None
 
 
 def check_endpoint(ip, port, source, method):
@@ -523,6 +604,10 @@ API_TTL = {
     "dz_devices": 120,         # 2 min — core monitoring
     "dz_users": 120,           # 2 min — core monitoring
     "dz_multicast": 120,       # 2 min — core monitoring
+    "dz_publishers": 120,      # 2 min — multicast publisher lists
+    "dz_health_devices": 300,  # 5 min — matches DZ update frequency
+    "dz_health_links": 300,    # 5 min — matches DZ update frequency
+    "dz_contributors": 3600,   # 1 hour — infrastructure changes slowly
     "bam_validators": 120,     # 2 min
     "bam_nodes": 120,          # 2 min
     "bam_ibrl": 3600,          # 1 hour
@@ -819,6 +904,12 @@ class SolanaNetworkAnalyzer:
         self.bam_nodes_api = []; self.bam_validators_api = {}; self.bam_ibrl_api = {}
         self.bam_stake_api = {}; self.bam_api_available = False
         self.dz_multicast_groups = []
+        self.dz_publishers_by_ip = {}     # client_ip -> [group_codes]
+        self.dz_publishers_by_pubkey = {} # node_pubkey -> [group_codes]
+        self.dz_network_health = {}       # device + link telemetry
+        self.dz_contributors_data = []    # contributor list
+        self.dz_malbec_available = False   # True if Malbec API responded
+        self.dz_device_details = {}       # device_code -> {max_users, current_users, ...}
         self.rakurai_data = {}
         self.endpoint_records: List[NodeInfo] = []
         self.current_epoch = None; self.current_slot = None; self.epoch_completed_percent = None
@@ -848,6 +939,8 @@ class SolanaNetworkAnalyzer:
         if self.cluster == "mainnet-beta": self._fetch_dz_multicast()
         if self.cluster == "mainnet-beta": self._fetch_bam()
         if self.cluster == "mainnet-beta": self._fetch_rakurai()
+        if self.cluster == "mainnet-beta": self._fetch_dz_health()
+        if self.cluster == "mainnet-beta": self._fetch_dz_contributors()
         self._fetch_endpoints_from_config()
         self._check_endpoints_reachability()
         self._fetch_epoch()
@@ -978,84 +1071,252 @@ class SolanaNetworkAnalyzer:
     def _fetch_doublezero(self):
         logger.info("🔌 Fetching DoubleZero...")
         dz_env = {"mainnet-beta":"mainnet-beta","testnet":"testnet","devnet":"devnet"}.get(self.cluster, "mainnet-beta")
-        # Devices
-        try:
-            devices = self.api_cache.get("dz_devices", dz_env, API_TTL["dz_devices"])
-            if devices is None:
-                r = subprocess.run(["doublezero","--env",dz_env,"device","list","--json"], capture_output=True, text=True, timeout=30)
-                if r.returncode == 0:
-                    try: devices = json.loads(r.stdout)
-                    except: devices = []
-                    self.api_cache.set("dz_devices", dz_env, devices)
-                else: devices = []
+
+        # === METROS (map metro_code → metro_name, needed for devices API) ===
+        metro_names = {}  # code -> name
+        metros_resp = _fetch_malbec_single("metros?limit=100&offset=0")
+        if metros_resp:
+            items = metros_resp.get("items", metros_resp) if isinstance(metros_resp, dict) else metros_resp
+            for m in (items if isinstance(items, list) else []):
+                metro_names[m.get("code", "")] = m.get("name", "")
+            if metro_names: self.dz_malbec_available = True
+
+        # === DEVICES (Malbec API primary, CLI fallback) ===
+        devices = self.api_cache.get("dz_devices", dz_env, API_TTL["dz_devices"])
+        if devices is not None:
+            logger.info("  📦 DZ devices from cache")
+        else:
+            devices = _fetch_malbec_paginated("devices")
+            if devices is not None:
+                self.dz_malbec_available = True
+                self.api_cache.set("dz_devices", dz_env, devices)
             else:
-                logger.info("  📦 DZ devices from cache")
+                # CLI fallback
+                try:
+                    r = subprocess.run(["doublezero","--env",dz_env,"device","list","--json"],
+                                       capture_output=True, text=True, timeout=30)
+                    if r.returncode == 0:
+                        try: devices = json.loads(r.stdout)
+                        except: devices = []
+                        self.api_cache.set("dz_devices", dz_env, devices)
+                    else: devices = []
+                except FileNotFoundError: logger.warning("  ⚠️  doublezero CLI not found"); devices = []
+                except Exception as e: logger.warning(f"  ⚠️  DZ devices CLI: {e}"); devices = []
+
+        if devices:
             logger.info(f"✅ {len(devices)} DZ devices")
             for d in devices:
                 ip = d.get("public_ip")
-                if ip:
-                    self.all_ips.add(ip)
-                    self.records.append(NodeInfo(identity_pubkey=d['account'], ip_address=ip, role="dz-device",
-                        is_dz_device=True, dz_connected=True, dz_device_account=d.get("account"),
-                        dz_device_name=d.get("code"), dz_location=d.get("location_name"), dz_exchange=d.get("exchange_name")))
-        except FileNotFoundError: logger.warning("⚠️  doublezero CLI not found")
-        except Exception as e: logger.warning(f"⚠️  DZ devices: {e}")
-        # Users
-        try:
-            users = self.api_cache.get("dz_users", dz_env, API_TTL["dz_users"])
-            if users is None:
-                r = subprocess.run(["doublezero","--env",dz_env,"user","list","--json"], capture_output=True, text=True, timeout=30)
-                if r.returncode == 0:
-                    try: users = json.loads(r.stdout)
-                    except: users = []
-                    self.api_cache.set("dz_users", dz_env, users)
-                else: users = []
-            else:
-                logger.info("  📦 DZ users from cache")
-            logger.info(f"✅ {len(users)} DZ users")
-            for u in users:
-                m = re.search(r'SolanaValidator: \(([^)]+)\)', u.get("accesspass",""))
-                if m:
-                    for rec in self.records:
-                        if rec.identity_pubkey == m.group(1):
-                            rec.dz_connected = True; rec.dz_device_name = u.get("device_name",""); rec.dz_location = u.get("location_name","")
-        except Exception as e: logger.warning(f"⚠️  DZ users: {e}")
+                if not ip: continue
+                self.all_ips.add(ip)
+                mc = d.get("metro_code", "")
+                loc = d.get("metro_name") or metro_names.get(mc, "") or d.get("location_name", "")
+                code = d.get("code", "")
+                self.records.append(NodeInfo(
+                    identity_pubkey=d.get("pk", d.get("account", "")), ip_address=ip, role="dz-device",
+                    is_dz_device=True, dz_connected=True,
+                    dz_device_account=d.get("pk", d.get("account")),
+                    dz_device_name=code,
+                    dz_location=loc,
+                    dz_exchange=d.get("exchange_name"),
+                    dz_metro_code=mc,
+                    dz_contributor=d.get("contributor_code"),
+                ))
+                # Store device capacity/traffic details for export
+                if code:
+                    self.dz_device_details[code] = {
+                        "device_type": d.get("device_type"),
+                        "max_users": d.get("max_users"),
+                        "current_users": d.get("current_users"),
+                        "in_bps": d.get("in_bps"),
+                        "out_bps": d.get("out_bps"),
+                        "validator_count": d.get("validator_count"),
+                        "stake_sol": d.get("stake_sol"),
+                    }
 
-        # Auto-generate geo overrides from DZ devices
+        # === USERS (Malbec API primary, CLI fallback) ===
+        users = self.api_cache.get("dz_users", dz_env, API_TTL["dz_users"])
+        if users is not None:
+            logger.info("  📦 DZ users from cache")
+        else:
+            users = _fetch_malbec_paginated("users")
+            if users is not None:
+                self.dz_malbec_available = True
+                self.api_cache.set("dz_users", dz_env, users)
+            else:
+                # CLI fallback
+                try:
+                    r = subprocess.run(["doublezero","--env",dz_env,"user","list","--json"],
+                                       capture_output=True, text=True, timeout=30)
+                    if r.returncode == 0:
+                        try: users = json.loads(r.stdout)
+                        except: users = []
+                        self.api_cache.set("dz_users", dz_env, users)
+                    else: users = []
+                except Exception as e: logger.warning(f"  ⚠️  DZ users CLI: {e}"); users = []
+
+        if users:
+            logger.info(f"✅ {len(users)} DZ users")
+            # Build IP → connection types map
+            ip_kinds = defaultdict(set)   # client_ip -> {"ibrl", "multicast"}
+            ip_device = {}                # client_ip -> device_code
+            ip_metro = {}                 # client_ip -> (metro_code, metro_name)
+            for u in users:
+                cip = u.get("client_ip")
+                if not cip: continue
+                kind = u.get("kind", "")
+                if kind: ip_kinds[cip].add(kind)
+                if cip not in ip_device:
+                    ip_device[cip] = u.get("device_code", u.get("device_name", ""))
+                    mc = u.get("metro_code", "")
+                    mn = u.get("metro_name") or metro_names.get(mc, "") or u.get("location_name", "")
+                    ip_metro[cip] = (mc, mn)
+                # Old-style CLI fallback: accesspass regex
+                if not kind and u.get("accesspass"):
+                    m = re.search(r'SolanaValidator: \(([^)]+)\)', u.get("accesspass", ""))
+                    if m:
+                        for rec in self.records:
+                            if rec.identity_pubkey == m.group(1):
+                                rec.dz_connected = True
+                                rec.dz_device_name = rec.dz_device_name or u.get("device_name", "")
+                                rec.dz_location = rec.dz_location or u.get("location_name", "")
+
+            # Map users to validator records by client_ip
+            for rec in self.records:
+                if not rec.ip_address or rec.is_dz_device: continue
+                if rec.ip_address in ip_kinds:
+                    rec.dz_connected = True
+                    kinds = ip_kinds[rec.ip_address]
+                    if "ibrl" in kinds and "multicast" in kinds:
+                        rec.dz_connection_type = "ibrl+multicast"
+                    elif "multicast" in kinds:
+                        rec.dz_connection_type = "multicast"
+                    elif "ibrl" in kinds:
+                        rec.dz_connection_type = "ibrl"
+                    if not rec.dz_device_name:
+                        rec.dz_device_name = ip_device.get(rec.ip_address, "")
+                    metro = ip_metro.get(rec.ip_address, ("", ""))
+                    if not rec.dz_location: rec.dz_location = metro[1]
+                    if not rec.dz_metro_code: rec.dz_metro_code = metro[0]
+
+        # === Auto-generate geo overrides from DZ devices ===
         if self.geo_overrides_path:
             dz_devices = [r for r in self.records if r.is_dz_device]
             dz_overrides = generate_dz_overrides(dz_devices)
-            # Load existing, preserve admin entries
             existing = load_geo_overrides(self.geo_overrides_path)
             admin_entries = {ip: e for ip, e in existing.items() if e.get("source") != "doublezero-verified"}
-            merged = {**dz_overrides, **admin_entries}  # admin overrides DZ if same IP
+            merged = {**dz_overrides, **admin_entries}
             save_geo_overrides(self.geo_overrides_path, merged)
             self.geo_overrides = merged
             logger.info(f"  🗺️  Geo overrides: {len(dz_overrides)} DZ + {len(admin_entries)} admin")
 
     def _fetch_dz_multicast(self):
-        """Fetch DZ multicast group summary."""
+        """Fetch DZ multicast groups and publisher lists via Malbec API."""
         logger.info("📡 Fetching DZ multicast...")
         dz_env = {"mainnet-beta":"mainnet-beta","testnet":"testnet","devnet":"devnet"}.get(self.cluster, "mainnet-beta")
         try:
+            # === GROUPS ===
             groups = self.api_cache.get("dz_multicast", dz_env, API_TTL["dz_multicast"])
-            if groups is None:
-                r = subprocess.run(["doublezero","--env",dz_env,"multicast","group","list","--json"],
-                                   capture_output=True, text=True, timeout=30)
-                if r.returncode == 0:
-                    try: groups = json.loads(r.stdout)
-                    except:
-                        # Fallback: parse table output
-                        groups = self._parse_dz_multicast_table(r.stdout)
-                    self.api_cache.set("dz_multicast", dz_env, groups)
-                else:
-                    groups = []
-            else:
+            if groups is not None:
                 logger.info("  📦 DZ multicast from cache")
-            self.dz_multicast_groups = groups
-            logger.info(f"✅ {len(groups)} DZ multicast groups")
-        except FileNotFoundError: logger.warning("⚠️  doublezero CLI not found"); self.dz_multicast_groups = []
-        except Exception as e: logger.warning(f"⚠️  DZ multicast: {e}"); self.dz_multicast_groups = []
+            else:
+                # Try Malbec API first
+                api_groups = _fetch_malbec_single("multicast-groups", timeout=MALBEC_API_TIMEOUT)
+                if api_groups and isinstance(api_groups, list):
+                    groups = api_groups
+                    self.dz_malbec_available = True
+                else:
+                    # CLI fallback
+                    try:
+                        r = subprocess.run(["doublezero","--env",dz_env,"multicast","group","list","--json"],
+                                           capture_output=True, text=True, timeout=30)
+                        if r.returncode == 0:
+                            try: groups = json.loads(r.stdout)
+                            except: groups = self._parse_dz_multicast_table(r.stdout)
+                        else: groups = []
+                    except FileNotFoundError: groups = []
+                    except Exception as e: logger.warning(f"  ⚠️  DZ multicast CLI: {e}"); groups = []
+                self.api_cache.set("dz_multicast", dz_env, groups)
+
+            self.dz_multicast_groups = groups or []
+            logger.info(f"✅ {len(self.dz_multicast_groups)} DZ multicast groups")
+
+            # === PUBLISHERS per active group ===
+            active_groups = [g for g in self.dz_multicast_groups
+                            if (g.get("publisher_count") or g.get("publishers", 0)) > 0]
+            if active_groups and self.dz_malbec_available:
+                self._fetch_dz_multicast_publishers(active_groups)
+
+        except Exception as e:
+            logger.warning(f"⚠️  DZ multicast: {e}"); self.dz_multicast_groups = []
+
+    def _fetch_dz_multicast_publishers(self, active_groups):
+        """Fetch publisher lists for active multicast groups and map to validators."""
+        all_publishers_cache_key = "dz_publishers"
+        dz_env = self.cluster
+        cached = self.api_cache.get(all_publishers_cache_key, dz_env, API_TTL["dz_publishers"])
+        if cached is not None:
+            logger.info("  📦 DZ publishers from cache")
+            publishers_data = cached
+        else:
+            publishers_data = {}  # group_code -> list of publisher dicts
+            def _fetch_group_publishers(g):
+                code = g.get("code", "")
+                pk = g.get("pk", g.get("account", ""))
+                if not pk: return code, []
+                members = _fetch_malbec_single(
+                    f"multicast-groups/{pk}/members?tab=publishers&limit=1000")
+                if members and "items" in members:
+                    return code, members["items"]
+                return code, []
+
+            with ThreadPoolExecutor(max_workers=min(len(active_groups), 5)) as ex:
+                futures = {ex.submit(_fetch_group_publishers, g): g for g in active_groups}
+                for f in as_completed(futures):
+                    try:
+                        code, items = f.result()
+                        if items:
+                            publishers_data[code] = items
+                            logger.info(f"    📡 {code}: {len(items)} publishers")
+                    except Exception as e:
+                        logger.warning(f"    ⚠️  Publisher fetch error: {e}")
+            self.api_cache.set(all_publishers_cache_key, dz_env, publishers_data)
+
+        # Build lookup maps: IP -> groups, pubkey -> groups
+        for code, pubs in publishers_data.items():
+            for p in pubs:
+                cip = p.get("client_ip", "")
+                npk = p.get("node_pubkey", "")
+                if cip:
+                    if cip not in self.dz_publishers_by_ip: self.dz_publishers_by_ip[cip] = []
+                    if code not in self.dz_publishers_by_ip[cip]: self.dz_publishers_by_ip[cip].append(code)
+                if npk:
+                    if npk not in self.dz_publishers_by_pubkey: self.dz_publishers_by_pubkey[npk] = []
+                    if code not in self.dz_publishers_by_pubkey[npk]: self.dz_publishers_by_pubkey[npk].append(code)
+
+        # Map publishers to validator records
+        pub_matched = 0
+        for rec in self.records:
+            if not rec.is_validator: continue
+            groups = set()
+            # Match by identity pubkey (node_pubkey in publisher data)
+            if rec.identity_pubkey in self.dz_publishers_by_pubkey:
+                groups.update(self.dz_publishers_by_pubkey[rec.identity_pubkey])
+            # Match by IP as fallback
+            if rec.ip_address and rec.ip_address in self.dz_publishers_by_ip:
+                groups.update(self.dz_publishers_by_ip[rec.ip_address])
+            if groups:
+                rec.dz_multicast_publisher = True
+                rec.dz_multicast_groups = sorted(groups)
+                pub_matched += 1
+                # Ensure connection type reflects multicast
+                if rec.dz_connection_type == "ibrl":
+                    rec.dz_connection_type = "ibrl+multicast"
+                elif not rec.dz_connection_type:
+                    rec.dz_connection_type = "multicast"
+
+        total_pubs = sum(len(v) for v in publishers_data.values())
+        logger.info(f"  ✅ DZ publishers: {total_pubs} total, {pub_matched} validators matched")
 
     @staticmethod
     def _parse_dz_multicast_table(text):
@@ -1201,6 +1462,98 @@ class SolanaNetworkAnalyzer:
             logger.info(f"  ✅ Rakurai: {len(validators)} validators, {rak_applied} matched")
         except Exception as e:
             logger.warning(f"  ⚠️  Rakurai: {e}")
+
+    def _fetch_dz_health(self):
+        """Fetch DZ network health: device telemetry + link telemetry."""
+        logger.info("🏥 Fetching DZ network health...")
+        health = {}
+        try:
+            # Device telemetry
+            dev_telem = self.api_cache.get("dz_health_devices", "mainnet", API_TTL["dz_health_devices"])
+            if dev_telem is not None:
+                logger.info("  📦 DZ device health from cache")
+            else:
+                dev_telem = _fetch_dz_health_api("current-device-telemetry", "mainnet")
+                if dev_telem is not None:
+                    self.api_cache.set("dz_health_devices", "mainnet", dev_telem)
+
+            if dev_telem:
+                reporting = [d for d in dev_telem if d.get("status") == "reporting"]
+                no_telem = [d for d in dev_telem if d.get("status") != "reporting"]
+                health["devices_total"] = len(dev_telem)
+                health["devices_reporting"] = len(reporting)
+                health["devices_no_telemetry"] = len(no_telem)
+                if no_telem:
+                    health["devices_issues"] = [
+                        {"device_id": d.get("device_id"), "location": d.get("location"), "status": d.get("status")}
+                        for d in no_telem
+                    ]
+
+            # Link telemetry
+            link_telem = self.api_cache.get("dz_health_links", "mainnet", API_TTL["dz_health_links"])
+            if link_telem is not None:
+                logger.info("  📦 DZ link health from cache")
+            else:
+                link_telem = _fetch_dz_health_api("current-link-telemetry", "mainnet")
+                if link_telem is not None:
+                    self.api_cache.set("dz_health_links", "mainnet", link_telem)
+
+            if link_telem:
+                healthy = [l for l in link_telem if l.get("quality_status") == "healthy"]
+                degraded = [l for l in link_telem if l.get("quality_status") not in ("healthy", "unavailable") and l.get("quality_status")]
+                unavail = [l for l in link_telem if l.get("quality_status") == "unavailable"]
+                health["links_total"] = len(link_telem)
+                health["links_healthy"] = len(healthy)
+                health["links_degraded"] = len(degraded)
+                health["links_unavailable"] = len(unavail)
+                issues = [l for l in link_telem if l.get("quality_status") in ("unavailable",) or (l.get("packet_loss") or 0) > 0]
+                if issues:
+                    health["link_issues"] = [
+                        {"link": l.get("link_name"), "source_target": l.get("source_target"),
+                         "contributor": l.get("contributor_name"), "quality": l.get("quality_status"),
+                         "rtt_ms": round(l.get("rtt_ms", 0), 2), "packet_loss": l.get("packet_loss", 0)}
+                        for l in issues[:20]  # cap at 20 issues
+                    ]
+
+            if health:
+                self.dz_network_health = health
+                dev_info = f"devices: {health.get('devices_reporting', '?')}/{health.get('devices_total', '?')}" if "devices_total" in health else ""
+                link_info = f"links: {health.get('links_healthy', '?')}/{health.get('links_total', '?')} healthy" if "links_total" in health else ""
+                parts = [p for p in [dev_info, link_info] if p]
+                logger.info(f"  ✅ DZ health: {', '.join(parts)}")
+            else:
+                logger.info("  ℹ️  DZ health: no telemetry data available")
+
+        except Exception as e:
+            logger.warning(f"  ⚠️  DZ health: {e}")
+
+    def _fetch_dz_contributors(self):
+        """Fetch DZ infrastructure contributors with bandwidth details."""
+        try:
+            contribs = self.api_cache.get("dz_contributors", "mainnet", API_TTL["dz_contributors"])
+            if contribs is not None:
+                logger.info("  📦 DZ contributors from cache")
+            else:
+                contribs = _fetch_malbec_paginated("contributors")
+                if contribs is not None:
+                    # Enrich with detail data (bandwidth) — parallel fetch
+                    def _fetch_detail(c):
+                        pk = c.get("pk", "")
+                        if not pk: return c
+                        detail = _fetch_malbec_single(f"contributors/{pk}")
+                        if detail:
+                            c["in_bps"] = detail.get("in_bps")
+                            c["out_bps"] = detail.get("out_bps")
+                            c["user_count"] = detail.get("user_count")
+                        return c
+                    with ThreadPoolExecutor(max_workers=min(len(contribs), 7)) as ex:
+                        list(ex.map(_fetch_detail, contribs))
+                    self.api_cache.set("dz_contributors", "mainnet", contribs)
+            if contribs:
+                self.dz_contributors_data = contribs
+                logger.info(f"  ✅ DZ contributors: {len(contribs)}")
+        except Exception as e:
+            logger.warning(f"  ⚠️  DZ contributors: {e}")
 
     def _fetch_endpoints_from_config(self):
         logger.info(f"🔗 Loading endpoints from {self.endpoints_config}...")
@@ -1473,26 +1826,73 @@ class SolanaNetworkAnalyzer:
         tv = len(all_val)
         dvs = sum(r.stake_percentage or 0 for r in dz_v)
 
+        # Connection type breakdown
+        dz_ibrl = len([r for r in dz_v if r.dz_connection_type == "ibrl"])
+        dz_mc = len([r for r in dz_v if r.dz_connection_type == "multicast"])
+        dz_both = len([r for r in dz_v if r.dz_connection_type == "ibrl+multicast"])
+        dz_unknown = len([r for r in dz_v if r.dz_connected and not r.dz_connection_type])
+
+        # Multicast publisher stats
+        mc_pubs = [r for r in all_val if r.dz_multicast_publisher]
+        mc_pub_stake = sum(r.stake_percentage or 0 for r in mc_pubs)
+
+        # Multicast groups — normalize field names from API vs CLI
+        mc_groups = []
+        for g in self.dz_multicast_groups:
+            pubs = g.get("publisher_count", g.get("publishers", 0)) or 0
+            subs = g.get("subscriber_count", g.get("subscribers", 0)) or 0
+            mc_groups.append({
+                "code": g.get("code"), "multicast_ip": g.get("multicast_ip"),
+                "max_bandwidth": _format_bandwidth(g.get("max_bandwidth")),
+                "publishers": pubs,
+                "subscribers": subs, "status": g.get("status"),
+            })
+
+        # Contributors summary
+        dz_contribs = None
+        if self.dz_contributors_data:
+            dz_contribs = []
+            for c in sorted(self.dz_contributors_data, key=lambda x: x.get("device_count", 0), reverse=True):
+                entry = {"code": c.get("code"), "name": c.get("name"), "devices": c.get("device_count", 0),
+                         "links": c.get("link_count", 0)}
+                in_bps = c.get("in_bps"); out_bps = c.get("out_bps")
+                if in_bps is not None: entry["in_bandwidth"] = _format_bandwidth(in_bps)
+                if out_bps is not None: entry["out_bandwidth"] = _format_bandwidth(out_bps)
+                dz_contribs.append(entry)
+
+        dz_metrics = {
+            "total": len(dz_all),
+            "validators": len(dz_v), "validators_percent": round(len(dz_v)/tv*100,1) if tv else 0,
+            "validators_stake_percent": round(dvs, 2),
+            "connection_types": {
+                "ibrl_only": dz_ibrl, "multicast_only": dz_mc,
+                "ibrl_and_multicast": dz_both, "unknown": dz_unknown,
+            },
+            "multicast_publishers": {
+                "total": len(mc_pubs), "stake_percent": round(mc_pub_stake, 2),
+            },
+            "rpc": len([r for r in dz_all if r.is_rpc]),
+            "devices": len([r for r in dz_all if r.is_dz_device]),
+            "other": dict(Counter(r.role for r in dz_all
+                if not r.is_validator and not r.is_rpc and not r.is_dz_device).most_common()),
+            "multicast_groups": mc_groups if mc_groups else [],
+        }
+        if dz_contribs: dz_metrics["contributors"] = dz_contribs
+        if self.dz_network_health: dz_metrics["network_health"] = self.dz_network_health
+
+        # DZ geo distributions
+        dz_devs = [r for r in dz_all if r.is_dz_device and r.ip_address]
+        if dz_devs:
+            dz_metrics["device_geo"] = self._geo_distributions(dz_devs)
+        if dz_v:
+            dz_metrics["validator_geo"] = self._geo_distributions(dz_v, include_stake=True)
+
         return {
             "overall": self._cat_metrics(online),
             "validators": self._val_metrics(online_val, all_val),
             "rpc": self._cat_metrics(rpc),
             "endpoints": ep_metrics,
-            "doublezero": {
-                "total": len(dz_all),
-                "validators": len(dz_v), "validators_percent": round(len(dz_v)/tv*100,1) if tv else 0,
-                "validators_stake_percent": round(dvs, 2),
-                "rpc": len([r for r in dz_all if r.is_rpc]),
-                "devices": len([r for r in dz_all if r.is_dz_device]),
-                "other": dict(Counter(r.role for r in dz_all
-                    if not r.is_validator and not r.is_rpc and not r.is_dz_device).most_common()),
-                "multicast_groups": [
-                    {"code": g.get("code"), "multicast_ip": g.get("multicast_ip"),
-                     "max_bandwidth": g.get("max_bandwidth"), "publishers": g.get("publishers", 0),
-                     "subscribers": g.get("subscribers", 0), "status": g.get("status")}
-                    for g in self.dz_multicast_groups
-                ] if self.dz_multicast_groups else [],
-            },
+            "doublezero": dz_metrics,
             "bam": self._bam_metrics(all_val),
             "rakurai": self._rakurai_metrics(all_val),
             "cluster_health": self.cluster_health,
@@ -1532,6 +1932,14 @@ class SolanaNetworkAnalyzer:
             m["ibrl_aggregates"] = self._ibrl_aggregates(ibrl_vals)
             m["ibrl_total_validators"] = len(ibrl_vals)
 
+        # BAM geo distributions
+        if bam_connected:
+            m["validator_geo"] = self._geo_distributions(bam_connected, include_stake=True)
+        # BAM nodes geo (from endpoints with role jito-bam)
+        bam_node_records = [r for r in self.records if r.endpoint_service == "bam" and r.ip_address]
+        if bam_node_records:
+            m["node_geo"] = self._geo_distributions(bam_node_records)
+
         return m
 
     def _rakurai_metrics(self, all_val):
@@ -1554,24 +1962,30 @@ class SolanaNetworkAnalyzer:
 
         # Geo distribution of Rakurai validators
         if rak_vals:
-            cc, ac, cic = Counter(), Counter(), Counter()
-            for r in rak_vals:
-                g = self.geo_data.get(r.ip_address)
-                if g:
-                    cc[g.country_code] += 1; ac[g.asn_name] += 1
-                    cic[f"{normalize_city(g.city)}, {g.country_code}"] += 1
-            m["country_distribution"] = dict(cc.most_common())
-            m["asn_distribution"] = dict(ac.most_common())
-            m["city_distribution"] = dict(cic.most_common())
-
-            # Stake-weighted distribution
-            scc = Counter()
-            for r in rak_vals:
-                g = self.geo_data.get(r.ip_address)
-                if g: scc[g.country_code] += r.stake_percentage or 0
-            m["stake_by_country"] = {k: round(v, 4) for k, v in scc.most_common()}
+            m.update(self._geo_distributions(rak_vals, include_stake=True))
 
         return m
+
+    def _geo_distributions(self, records, include_stake=False):
+        """Compute country/asn/city distributions for a set of records."""
+        cc, ac, cic = Counter(), Counter(), Counter()
+        for r in records:
+            g = self.geo_data.get(r.ip_address)
+            if g:
+                cc[g.country_code] += 1; ac[g.asn_name] += 1
+                cic[f"{normalize_city(g.city)}, {g.country_code}"] += 1
+        result = {
+            "country_distribution": dict(cc.most_common()),
+            "asn_distribution": dict(ac.most_common()),
+            "city_distribution": dict(cic.most_common()),
+        }
+        if include_stake:
+            scc = Counter()
+            for r in records:
+                g = self.geo_data.get(r.ip_address)
+                if g: scc[g.country_code] += r.stake_percentage or 0
+            result["stake_by_country"] = {k: round(v, 4) for k, v in scc.most_common()}
+        return result
 
     def _ibrl_aggregates(self, ibrl_vals):
         """Calculate average IBRL metrics by country, ASN, city."""
@@ -1845,12 +2259,28 @@ class SolanaNetworkAnalyzer:
 
         # DZ fields (ALWAYS present for DZ nodes)
         if rec.dz_connected or rec.is_dz_device:
-            d.update({
+            dz_block = {
                 "dz_connected": rec.dz_connected,
                 "dz_device_name": rec.dz_device_name,
                 "dz_location": rec.dz_location,
                 "dz_exchange": rec.dz_exchange,
-            })
+                "dz_metro_code": rec.dz_metro_code,
+            }
+            if rec.dz_connection_type: dz_block["dz_connection_type"] = rec.dz_connection_type
+            if rec.dz_multicast_publisher: dz_block["dz_multicast_publisher"] = True
+            if rec.dz_multicast_groups: dz_block["dz_multicast_groups"] = rec.dz_multicast_groups
+            if rec.is_dz_device and rec.dz_contributor:
+                dz_block["dz_contributor"] = rec.dz_contributor
+            # Device capacity/traffic (only for dz-device role)
+            if rec.is_dz_device and rec.dz_device_name and rec.dz_device_name in self.dz_device_details:
+                dd = self.dz_device_details[rec.dz_device_name]
+                dz_block["dz_device_type"] = dd.get("device_type")
+                if dd.get("max_users") is not None:
+                    dz_block["dz_capacity"] = f"{dd.get('current_users', 0)}/{dd['max_users']}"
+                if dd.get("in_bps") is not None:
+                    dz_block["dz_in_bandwidth"] = _format_bandwidth(dd["in_bps"])
+                    dz_block["dz_out_bandwidth"] = _format_bandwidth(dd.get("out_bps"))
+            d.update(dz_block)
 
         # Endpoint fields (ALWAYS present for endpoints)
         if rec.endpoint_provider:
@@ -1907,7 +2337,7 @@ class SolanaNetworkAnalyzer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Solana Network Decentralization Analyzer v3.5.1")
+    parser = argparse.ArgumentParser(description="Solana Network Decentralization Analyzer v3.6")
     parser.add_argument("--dbip-key", default=os.getenv("DBIP_KEY",""))
     parser.add_argument("--ipinfo-token", default=os.getenv("IPINFO_TOKEN",""))
     parser.add_argument("--token", default=None, help="(deprecated)")
