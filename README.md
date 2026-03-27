@@ -11,7 +11,7 @@
 🌐 Dashboard (coming soon): [sonda.network](https://sonda.network)
 
 > [!NOTE]
-> SONDA is under active development. The core analyzer is production-ready and tested on mainnet.
+> SONDA is under active development. The core analyzer and historical data collector are production-ready and tested on mainnet.
 > The public dashboard and automation layer are coming next.
 
 ---
@@ -27,6 +27,8 @@ Solana has dozens of dashboards. Most pull data from a single source and display
 - **Multi-dimensional decentralization metrics.** Nakamoto coefficient alone doesn't tell the full story. SONDA computes Nakamoto, HHI, Gini, and Shannon entropy across 4 dimensions simultaneously (country, ASN, city, validator) — revealing concentration patterns that single-metric tools miss entirely.
 
 - **MEV ecosystem visibility.** BAM (Block Auction Marketplace) integration with IBRL performance scores, Rakurai validator detection, Jito infrastructure mapping — showing who builds blocks, how fast, and where.
+
+- **Historical location tracking.** Per-validator datacenter timeline going back to epoch ~196 (2021). Where has each validator hosted? For how long? Which datacenters do they share? No other tool has this.
 
 ---
 
@@ -78,15 +80,23 @@ Each IP receives a confidence score (high/medium/low) based on source agreement.
 ## Architecture
 
 ```
-solana_analyzer.py          Single-file analyzer (~1,900 lines)
+solana_analyzer.py          Real-time network snapshot (~2,400 lines)
 ├── Data Collection         Gossip, validators, epoch from Solana CLI
-├── External APIs           Trillium, BAM, Rakurai, DoubleZero CLI
+├── External APIs           Trillium, BAM, Rakurai, DoubleZero (Malbec)
 ├── Geolocation Engine      4-source with adaptive TTL cache (SQLite)
 ├── Geo Overrides           DZ-verified locations + admin overrides
 ├── API Cache               Per-source TTL (2min → 4hr) in SQLite
 ├── Metrics Calculator      Nakamoto, HHI, Gini, Shannon, Superminority
 ├── Infrastructure Map      BAM nodes, IBRL, DZ multicast, Rakurai
 └── JSON Export             Structured output (~5.6 MB per scan)
+
+solana_history.py           Historical geo data collector (~1,250 lines)
+├── Jito kobe API           IP per epoch (~500+), parallel fetch ~40s
+├── SFDP API                ASN + datacenter per epoch (~196+)
+├── RIPE Stat / DB-IP       ASN name enrichment for historical records
+├── SQLite cache            SFDP responses cached permanently (historical = immutable)
+├── Resume / Update         Fault-tolerant: resume interrupted runs, incremental updates
+└── JSON Export             Per-validator location_changes timeline (~4 MB, mainnet)
 
 endpoints.yaml              Infrastructure endpoint configuration
 geo_overrides.yaml          Auto-generated DZ overrides + admin entries
@@ -106,6 +116,7 @@ Not all data changes at the same rate. SONDA caches intelligently:
 | BAM IBRL, stake | 1 hour | Calculated per epoch |
 | validator-info | 4 hours | On-chain, rarely changes |
 | Geolocation | 7–30 days | Separate SQLite DB, adaptive TTL |
+| SFDP epoch data | Permanent | Historical data — never changes |
 
 ---
 
@@ -126,7 +137,7 @@ cd sonda
 pip install requests pyyaml ntplib
 ```
 
-### Usage
+### Usage — Real-time Analyzer
 
 ```bash
 # Basic analysis (mainnet)
@@ -147,18 +158,44 @@ python solana_analyzer.py \
 python solana_analyzer.py --cluster testnet --export
 ```
 
+### Usage — Historical Data Collector
+
+```bash
+# Initial collection (mainnet) — takes ~6h for SFDP phase, resumable
+python solana_history.py \
+  --dbip-key YOUR_DBIP_KEY \
+  --ipinfo-token YOUR_IPINFO_TOKEN
+
+# Resume interrupted collection (Jito re-fetched in ~40s, SFDP continues from checkpoint)
+python solana_history.py --resume
+
+# Incremental update — add new epochs from Jito, preserve all SFDP data
+python solana_history.py --update --dbip-key YOUR_DBIP_KEY
+
+# Other clusters
+python solana_history.py --cluster testnet --dbip-key YOUR_KEY
+python solana_history.py --cluster devnet   # creates empty output
+
+# Recommended for long runs (protected from session disconnect)
+nohup python solana_history.py ... > history.log 2>&1 &
+tail -f history.log
+```
+
 ### API Keys
 
-| Service | Required | Free Tier |
+| Service | Required for | Free Tier |
 |---|---|---|
-| [DB-IP](https://db-ip.com/) | Yes (primary geo) | 10K lookups/month |
-| [IPInfo](https://ipinfo.io/) | Recommended | 50K lookups/month |
-| GeoJS | Auto (no key) | Unlimited |
-| ip-api | Auto (discrepancies) | 45 req/min |
+| [DB-IP](https://db-ip.com/) | Primary geo + ASN lookup | 10K lookups/day |
+| [IPInfo](https://ipinfo.io/) | Secondary geo verification | 50K lookups/month |
+| GeoJS | Tertiary geo (auto, no key) | Unlimited |
+| ip-api | Discrepancy resolution (auto) | 45 req/min |
+| RIPE Stat | ASN name lookup (auto, no key) | Unlimited |
 
 ---
 
 ## Output Format
+
+### Real-time Snapshot (`solana_analyzer.py`)
 
 SONDA produces a structured JSON with predictable field schemas per node role:
 
@@ -168,57 +205,84 @@ SONDA produces a structured JSON with predictable field schemas per node role:
   "cluster": "mainnet-beta",
   "epoch": 934,
   "slot": 403773442,
-  "epoch_completed_percent": 66.07453703703705,
+  "epoch_completed_percent": 66.07,
   "record_counts": {
     "validator": 773, "validator-hidden": 3, "validator-inactive": 27,
-    "backup-node": 0, "rpc": 204, "co-hosted": 2, "unknown-node": 3986,
-    "dz-device": 95, "jito-block-engine": 36, "jito-shred-receiver": 8,
-    "jito-ntp": 8, "jito-bam": 12, "harmonic-auction": 6,
-    "harmonic-tpu-relayer": 6, "harmonic-shred-receiver": 6, "harmonic-bundles": 6,
-    "solana-rpc-official": 1, "solana-entrypoint": 5
+    "rpc": 204, "co-hosted": 2, "dz-device": 95,
+    "jito-block-engine": 36, "jito-shred-receiver": 8, "jito-bam": 12
   },
   "records": [
     {
       "identity_pubkey": "...",
       "role": "validator",
       "ip_address": "1.2.3.4",
-      .....
       "geolocation": {
         "country_code": "US", "city": "Ashburn",
-        "confidence": "high", "discrepancy": false,
-        "primary_source": "dbip"
+        "confidence": "high", "discrepancy": false
       },
-      .....
       "is_rakurai": true,
       "bam_node": "ny-mainnet-bam-1-tee",
       "ibrl": { "ibrl_score": 97.2, "median_block_build_ms": 362 },
-      "dz_connected": true, "dz_device_name": "frankry", "dz_location": "Frankfurt"
+      "dz_connected": true, "dz_device_name": "frankry"
     }
   ],
   "metrics": {
-    "overall": {
-      "total": 5154,
-      "unique_ips": 5131,
-      "country_distribution": { ... },
-      "asn_distribution": { ... },
-      "city_distribution": { ... },
-    },
     "validators": {
-      "total": 773,
-      "unique_ips": 773,
-      "country_distribution": { ... },
-      .....
       "decentralization": {
-        "methodology": { ... },
-        "current": { ... },
+        "nakamoto": { "country": 3, "asn": 4, "city": 5, "validator": 9 },
+        "hhi": { "country": 1842, "asn": 1201 },
+        "gini": 0.847,
+        "shannon_entropy": { "country": 0.71, "asn": 0.68 }
       }
-    },
-    "rpc": { ... },
-    "endpoints": { ... },
-    "doublezero": { ... },
-    "bam": { ... },
-    "rakurai": { ... },
-    "cluster_health": { ... }
+    }
+  }
+}
+```
+
+### Historical Timeline (`solana_history.py`)
+
+Per-validator datacenter history from epoch ~196 (2021) to present:
+
+```json
+{
+  "meta": {
+    "cluster": "mainnet-beta",
+    "fetched_at": "2026-03-27T12:26:40Z",
+    "sources": ["jito_kobe", "sfdp", "stakewiz"],
+    "total_validators": 788
+  },
+  "epoch_dates": { "500": "2023-02-15", "947": "2026-03-25" },
+  "validators": {
+    "HwcVgFSg...": {
+      "identity": "HwN6eoEe...",
+      "vote_account": "HwcVgFSg...",
+      "location_changes": [
+        {
+          "from_epoch": 231, "to_epoch": 499,
+          "ip": null,
+          "country_code": "CA", "city": "Beauharnois",
+          "asn": "AS16276", "asn_name": "OVH",
+          "source": "sfdp",
+          "dc_stake_percent": 1.79
+        },
+        {
+          "from_epoch": 500, "to_epoch": 804,
+          "ip": "15.235.13.5",
+          "country_code": "CA", "city": "Montreal",
+          "region": "Quebec", "latitude": 45.50, "longitude": -73.57,
+          "asn": "AS16276", "asn_name": "OVH", "isp": "Ovh Sas",
+          "source": "jito"
+        },
+        {
+          "from_epoch": 805, "to_epoch": 947,
+          "ip": "216.238.110.55",
+          "country_code": "BR", "city": "São Paulo",
+          "asn": "AS20473", "asn_name": "AS-VULTR",
+          "isp": "The Constant Company",
+          "source": "jito"
+        }
+      ]
+    }
   }
 }
 ```
@@ -231,10 +295,11 @@ SONDA produces a structured JSON with predictable field schemas per node role:
 - [x] **Infrastructure Mapping** — BAM, DoubleZero, Rakurai, Jito, Harmonic
 - [x] **API Cache** — SQLite with per-source TTL strategy
 - [x] **Geo Overrides** — DZ-verified + admin overrides with full audit trail
+- [x] **Historical Collector** — Per-validator datacenter timeline back to epoch 196 (2021)
+- [x] **Resume / Update** — Fault-tolerant collection with incremental epoch updates
 - [ ] **Automation** — Cron scheduling, snapshot history, failure monitoring
 - [ ] **Public Dashboard** — Interactive visualization at [sonda.network](https://sonda.network)
-- [ ] **Historical Analysis** — Trend tracking, epoch-over-epoch comparisons
-- [ ] **Multi-chain** — Extending beyond Solana
+- [ ] **Historical Trends** — Epoch-over-epoch comparisons, stability scores
 
 ---
 
