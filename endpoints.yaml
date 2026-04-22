@@ -51,46 +51,6 @@ jito:
       singapore: ntp.singapore.jito.wtf
       tokyo: ntp.tokyo.jito.wtf
 
-    bam:
-      # bam_id maps to "bam_node" field in explorer.bam.dev/api/v1/nodes
-      # Reachability checked via API (connected_validators > 0), not TCP/HTTP
-      amsterdam:
-        ip: amsterdam.mainnet.bam.jito.wtf
-        bam_id: amsterdam-mainnet-bam-2-tee
-      amsterdam-1:
-        ip: amsterdam.mainnet.bam.jito.wtf
-        bam_id: amsterdam-mainnet-bam-1-tee
-      dublin:
-        ip: dublin.mainnet.bam.jito.wtf
-        bam_id: dublin-mainnet-bam-2-tee
-      dallas:
-        ip: dallas.mainnet.bam.jito.wtf
-        bam_id: dallas-mainnet-bam-1-tee
-      frankfurt:
-        ip: frankfurt.mainnet.bam.jito.wtf
-        bam_id: frankfurt-mainnet-bam-1-tee
-      london:
-        ip: london.mainnet.bam.jito.wtf
-        bam_id: london-mainnet-bam-1-tee
-      los-angeles:
-        ip: lax.mainnet.bam.jito.wtf
-        bam_id: lax-mainnet-bam-1-tee
-      new-york:
-        ip: ny.mainnet.bam.jito.wtf
-        bam_id: ny-mainnet-bam-1-tee
-      pittsburgh:
-        ip: pittsburgh.mainnet.bam.jito.wtf
-        bam_id: pittsburgh-mainnet-bam-1-tee
-      salt-lake-city:
-        ip: slc.mainnet.bam.jito.wtf
-        bam_id: slc-mainnet-bam-1-tee
-      singapore:
-        ip: singapore.mainnet.bam.jito.wtf
-        bam_id: singapore-mainnet-bam-1-tee
-      tokyo:
-        ip: tokyo.mainnet.bam.jito.wtf
-        bam_id: tokyo-mainnet-bam-1-tee
-
   testnet:
     block-engine:
       dallas: dallas.testnet.block-engine.jito.wtf

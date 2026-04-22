@@ -14,6 +14,14 @@ Changes from v3.6:
   Timeout increased 15s -> 20s. Multicast publishers fetch now recovers from
   previous cache if some groups fail mid-cycle (partial data merge), preventing
   "DZ publishers: 4 total" regressions when data.malbeclabs.com is flaky.
+- BAM endpoints: dynamic creation from BAM API (mainnet). Previously endpoints.yaml
+  held a hardcoded bam: section; Jito rotates BAM node names frequently
+  (e.g. '-1-tee' becomes '-2-tee'), causing constant false "missing from API" and
+  "new BAM node" warnings. Now each entry from /api/v1/nodes becomes an endpoint
+  record with bam_node as primary ID. Reachability: connected_validators > 0
+  -> reachable; 0 -> None (probe state, not a hard failure). Disappearance from
+  API is detected by timeseries.py via missing_cycles logic. Testnet BAM still
+  reads from endpoints.yaml (no public testnet BAM API).
 
 Changes from v3.5.1:
 - DoubleZero data migration: CLI -> Malbec HTTP API (data.malbeclabs.com)
@@ -1008,6 +1016,7 @@ class SolanaNetworkAnalyzer:
         if self.cluster == "mainnet-beta": self._fetch_dz_health()
         if self.cluster == "mainnet-beta": self._fetch_dz_contributors()
         self._fetch_endpoints_from_config()
+        if self.cluster == "mainnet-beta": self._create_bam_endpoints_from_api()
         self._check_endpoints_reachability()
         self._fetch_epoch()
         try: self._process_geolocation()
@@ -1655,48 +1664,88 @@ class SolanaNetworkAnalyzer:
             self.all_ips.add(ep['ip']); self.records.append(node); self.endpoint_records.append(node); c+=1
         logger.info(f"✅ {c} endpoints loaded")
 
+    def _create_bam_endpoints_from_api(self):
+        """Create BAM endpoint records dynamically from BAM API data.
+
+        BAM nodes auto-rotate names frequently (e.g. '-1-tee' becomes '-2-tee',
+        new regions appear, old ones disappear). Hardcoding them in
+        endpoints.yaml led to constant false 'missing from API' and 'new BAM
+        node' warnings.
+
+        Instead we treat /api/v1/nodes as the source of truth: every entry
+        becomes an endpoint record with role 'jito-bam' and reachability
+        derived directly from connected_validators count. The bam_node field
+        is the unique ID (region is unstable — Jito sometimes sets it to a
+        short alias, sometimes to the bam_node name itself).
+
+        Applies to mainnet only. Testnet BAM stays in endpoints.yaml as
+        there is no public BAM API for testnet.
+        """
+        if not self.bam_api_available or not self.bam_nodes_api:
+            logger.info("🎯 BAM endpoints: API unavailable, skipping")
+            return
+
+        logger.info(f"🎯 Creating BAM endpoints from API ({len(self.bam_nodes_api)} nodes)...")
+        created = 0
+        for n in self.bam_nodes_api:
+            bam_id = n.get("bam_node", "")
+            region = n.get("region", "")
+            connected = n.get("connected_validators", 0)
+            if not bam_id:
+                continue
+
+            # Derive region_short from bam_node name for DNS resolution.
+            # Pattern: "{region_short}-mainnet-bam-{N}-tee" → region_short
+            # Examples seen: amsterdam, dublin, dallas, frankfurt, london, lax,
+            # ny, pittsburgh, slc, singapore, tokyo.
+            # DNS endpoint: {region_short}.mainnet.bam.jito.wtf
+            region_short = bam_id.split("-mainnet-")[0] if "-mainnet-" in bam_id else (region or bam_id)
+            dns_host = f"{region_short}.mainnet.bam.jito.wtf"
+            ips = resolve_dns(dns_host)
+            ip = ips[0] if ips else dns_host
+
+            # Reachability: connected_validators > 0 → True, 0 → None (probe
+            # state, node might be warming up). Disappearance from API is
+            # detected separately by timeseries.py (missing_cycles logic).
+            if connected > 0:
+                reachable = True
+            else:
+                reachable = None
+                logger.info(f"  ⚠️  BAM {bam_id}: 0 connected validators (probe state)")
+
+            node = NodeInfo(
+                identity_pubkey=bam_id,  # use bam_node as unique identity
+                ip_address=ip,
+                role="jito-bam",
+                name=f"jito-bam-{region_short}",
+                endpoint_provider="jito",
+                endpoint_service="bam",
+                endpoint_label=region_short,
+                endpoint_port=None,
+                endpoint_bam_id=bam_id,
+                endpoint_reachable=reachable,
+                is_jito=True,
+                _ep_source="bam-api",
+            )
+            if ips:
+                self.all_ips.add(ip)
+            self.records.append(node)
+            self.endpoint_records.append(node)
+            created += 1
+        logger.info(f"  ✅ BAM endpoints: {created} created from API")
+
     def _check_endpoints_reachability(self):
         if not self.endpoint_records: return
         logger.info(f"🔍 Checking reachability for {len(self.endpoint_records)} endpoints...")
 
-        # Build BAM API node lookup (bam_node_name → node_data)
-        bam_api_nodes = {}
-        if self.bam_api_available:
-            for n in self.bam_nodes_api:
-                bam_api_nodes[n.get("bam_node", "")] = n
+        # BAM endpoints from mainnet BAM API are created by
+        # _create_bam_endpoints_from_api() with reachability already set.
+        # We skip them here; everything else (including testnet BAM from
+        # endpoints.yaml) goes through TCP/HTTPS check below.
+        already_checked = [n for n in self.endpoint_records if n._ep_source == "bam-api"]
+        other_eps = [n for n in self.endpoint_records if n._ep_source != "bam-api"]
 
-        # Check BAM endpoints via API, others via TCP/HTTP
-        bam_eps = [n for n in self.endpoint_records if n.endpoint_service == "bam"]
-        other_eps = [n for n in self.endpoint_records if n.endpoint_service != "bam"]
-
-        # BAM: check via API
-        yaml_bam_ids = set()
-        for node in bam_eps:
-            if node.endpoint_bam_id:
-                yaml_bam_ids.add(node.endpoint_bam_id)
-                if not self.bam_api_available:
-                    node.endpoint_reachable = None  # API unavailable
-                elif node.endpoint_bam_id in bam_api_nodes:
-                    api_node = bam_api_nodes[node.endpoint_bam_id]
-                    node.endpoint_reachable = api_node.get("connected_validators", 0) > 0
-                    if not node.endpoint_reachable:
-                        logger.warning(f"  ⚠️  BAM {node.endpoint_bam_id}: 0 connected validators")
-                else:
-                    node.endpoint_reachable = False  # In yaml but missing from API
-                    logger.warning(f"  ❌ BAM {node.endpoint_bam_id}: missing from API")
-            else:
-                node.endpoint_reachable = None  # No bam_id, can't verify
-
-        # Detect new BAM nodes not in yaml
-        if self.bam_api_available:
-            api_bam_ids = set(n.get("bam_node", "") for n in self.bam_nodes_api)
-            new_nodes = api_bam_ids - yaml_bam_ids
-            for new_id in sorted(new_nodes):
-                nd = bam_api_nodes.get(new_id, {})
-                logger.warning(f"  🆕 New BAM node: {new_id} (region={nd.get('region','?')}, "
-                              f"validators={nd.get('connected_validators',0)}) — add IP to endpoints.yaml")
-
-        # Other endpoints: TCP/HTTP check
+        # Non-BAM endpoints: TCP/HTTP check
         with ThreadPoolExecutor(max_workers=min(CONCURRENT_WORKERS, 10)) as ex:
             futures = {}
             for node in other_eps:
