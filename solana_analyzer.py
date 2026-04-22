@@ -1,7 +1,20 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.6
+Solana Network Decentralization Analyzer v3.7
 ==============================================
+Changes from v3.6:
+- run_solana_cmd: added critical=True mode for unlimited retry with backoff.
+  Now used for gossip, validators, and epoch fetches. When Solana RPC returns
+  transient errors (e.g. "invalid type: integer `3`, expected a string"),
+  the script retries indefinitely with progressive backoff (max 60s) until
+  the cluster responds correctly. This prevents losing whole snapshots to
+  temporary RPC issues common on all clusters (including paid RPCs).
+  Non-critical calls (Trillium, validator-info, etc.) still use bounded retries.
+- Malbec API: retry 3x with progressive backoff per request/page (was 1 attempt).
+  Timeout increased 15s -> 20s. Multicast publishers fetch now recovers from
+  previous cache if some groups fail mid-cycle (partial data merge), preventing
+  "DZ publishers: 4 total" regressions when data.malbeclabs.com is flaky.
+
 Changes from v3.5.1:
 - DoubleZero data migration: CLI -> Malbec HTTP API (data.malbeclabs.com)
   with CLI fallback for graceful degradation
@@ -72,7 +85,9 @@ RAKURAI_API_BASE = "https://api.rakurai.io/api/v1"
 RAKURAI_API_TIMEOUT = 10
 
 MALBEC_API_BASE = "https://data.malbeclabs.com/api/dz"
-MALBEC_API_TIMEOUT = 15
+MALBEC_API_TIMEOUT = 20
+MALBEC_API_RETRIES = 3
+MALBEC_RETRY_DELAYS = [0, 1, 3]  # seconds between attempts
 MALBEC_PAGE_SIZE = 100   # max items per page for paginated endpoints
 
 DZ_HEALTH_API_BASE = "https://doublezero.xyz/api/network_health/v1"
@@ -285,28 +300,57 @@ class NodeInfo:
 # HELPERS
 # ========================================================================
 
-def run_solana_cmd(args, timeout=RPC_TIMEOUT, retries=RPC_RETRIES, desc=""):
-    for attempt in range(retries):
+def run_solana_cmd(args, timeout=RPC_TIMEOUT, retries=RPC_RETRIES, desc="", critical=False):
+    """Execute solana CLI command with retries.
+
+    critical=False (default): tries up to `retries` times, then returns None.
+    critical=True: retries forever with progressive backoff capped at 60s.
+      Use for operations without which the snapshot is meaningless (gossip,
+      validators, epoch). Handles transient Solana RPC issues gracefully —
+      occasional "invalid type: integer `3`, expected a string" and similar
+      are retried until the cluster responds correctly. May delay the run
+      but ensures data integrity. Only returns None on fatal Python errors.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        error_msg = None
         try:
             result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
             if result.returncode == 0:
                 try:
                     return json.loads(result.stdout)
                 except json.JSONDecodeError as e:
-                    logger.error(f"Invalid JSON from {desc}: {e}")
-                    return None
+                    if critical:
+                        error_msg = f"invalid JSON: {e}"
+                    else:
+                        logger.error(f"Invalid JSON from {desc}: {e}")
+                        return None
             else:
-                if attempt < retries - 1:
-                    w = 2 ** attempt
-                    logger.warning(f"{desc} fail ({attempt+1}/{retries}), retry {w}s: {result.stderr[:150]}")
-                    time.sleep(w)
-                else:
-                    logger.error(f"{desc} failed after {retries}: {result.stderr[:200]}")
+                error_msg = result.stderr.strip()[:150] or f"exit code {result.returncode}"
         except subprocess.TimeoutExpired:
-            logger.warning(f"{desc} timeout ({attempt+1}/{retries})")
+            error_msg = f"timeout after {timeout}s"
         except Exception as e:
-            logger.error(f"{desc} error: {e}"); return None
-    return None
+            logger.error(f"{desc} error: {e}")
+            return None
+
+        # error_msg is set if we need to retry
+        if critical:
+            # Unlimited retry with progressive backoff: 2, 4, 8, 16, 32, 60, 60, ...
+            wait = min(60, 2 ** attempt)
+            # Log first 3 attempts, then every 10th to avoid spam
+            if attempt <= 3 or attempt % 10 == 0:
+                logger.warning(f"⚠️  {desc} fail (attempt {attempt}, retry in {wait}s): {error_msg}")
+            time.sleep(wait)
+            continue
+        # Non-critical: bounded retries
+        if attempt < retries:
+            w = 2 ** (attempt - 1)
+            logger.warning(f"{desc} fail ({attempt}/{retries}), retry {w}s: {error_msg}")
+            time.sleep(w)
+        else:
+            logger.error(f"{desc} failed after {retries}: {error_msg[:200]}")
+            return None
 
 
 def resolve_dns(domain):
@@ -338,43 +382,65 @@ def parse_ip_port(value):
 
 
 def _fetch_malbec_paginated(path, params=None, max_pages=20):
-    """Fetch all pages from Malbec API (data.malbeclabs.com).
+    """Fetch all pages from Malbec API (data.malbeclabs.com) with per-page retries.
     Returns list of items or None on failure."""
     all_items = []
     offset = 0
     for page in range(max_pages):
-        try:
-            p = {"limit": MALBEC_PAGE_SIZE, "offset": offset}
-            if params: p.update(params)
-            r = requests.get(f"{MALBEC_API_BASE}/{path}", params=p, timeout=MALBEC_API_TIMEOUT)
-            if r.status_code == 403:
-                logger.warning(f"  ⚠️  Malbec API blocked (403) for {path}"); return None
-            if r.status_code != 200:
-                logger.warning(f"  ⚠️  Malbec API HTTP {r.status_code} for {path}"); return None
-            data = r.json()
-            items = data.get("items", data if isinstance(data, list) else [])
-            all_items.extend(items)
-            total = data.get("total", len(items))
-            if offset + MALBEC_PAGE_SIZE >= total: break
-            offset += MALBEC_PAGE_SIZE
-        except requests.RequestException as e:
-            logger.warning(f"  ⚠️  Malbec API error for {path}: {e}"); return None
-        except Exception as e:
-            logger.warning(f"  ⚠️  Malbec API parse error for {path}: {e}"); return None
+        page_ok = False
+        last_error = None
+        for attempt, delay in enumerate(MALBEC_RETRY_DELAYS):
+            if delay:
+                time.sleep(delay)
+            try:
+                p = {"limit": MALBEC_PAGE_SIZE, "offset": offset}
+                if params:
+                    p.update(params)
+                r = requests.get(f"{MALBEC_API_BASE}/{path}", params=p, timeout=MALBEC_API_TIMEOUT)
+                if r.status_code == 403:
+                    logger.warning(f"  ⚠️  Malbec API blocked (403) for {path}")
+                    return None
+                if r.status_code == 200:
+                    data = r.json()
+                    items = data.get("items", data if isinstance(data, list) else [])
+                    all_items.extend(items)
+                    total = data.get("total", len(items))
+                    if offset + MALBEC_PAGE_SIZE >= total:
+                        return all_items
+                    offset += MALBEC_PAGE_SIZE
+                    page_ok = True
+                    break
+                last_error = f"HTTP {r.status_code}"
+            except requests.RequestException as e:
+                last_error = str(e)[:150]
+            except Exception as e:
+                logger.warning(f"  ⚠️  Malbec API parse error for {path}: {e}")
+                return None
+        if not page_ok:
+            logger.warning(f"  ⚠️  Malbec API error for {path} page {page} (after {MALBEC_API_RETRIES} retries): {last_error}")
+            return None
     return all_items
 
 
 def _fetch_malbec_single(path, timeout=MALBEC_API_TIMEOUT):
-    """Fetch single non-paginated endpoint from Malbec API. Returns parsed JSON or None."""
-    try:
-        r = requests.get(f"{MALBEC_API_BASE}/{path}", timeout=timeout)
-        if r.status_code == 403:
-            logger.warning(f"  ⚠️  Malbec API blocked (403) for {path}"); return None
-        if r.status_code != 200:
-            logger.warning(f"  ⚠️  Malbec API HTTP {r.status_code} for {path}"); return None
-        return r.json()
-    except Exception as e:
-        logger.warning(f"  ⚠️  Malbec API error for {path}: {e}"); return None
+    """Fetch single non-paginated endpoint from Malbec API with retries.
+    Returns parsed JSON or None after all retries exhausted."""
+    last_error = None
+    for attempt, delay in enumerate(MALBEC_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            r = requests.get(f"{MALBEC_API_BASE}/{path}", timeout=timeout)
+            if r.status_code == 403:
+                logger.warning(f"  ⚠️  Malbec API blocked (403) for {path}")
+                return None
+            if r.status_code == 200:
+                return r.json()
+            last_error = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_error = str(e)[:150]
+    logger.warning(f"  ⚠️  Malbec API error for {path} (after {MALBEC_API_RETRIES} retries): {last_error}")
+    return None
 
 
 def _fetch_dz_health_api(endpoint, network="mainnet"):
@@ -953,7 +1019,7 @@ class SolanaNetworkAnalyzer:
 
     def _fetch_gossip(self):
         logger.info("📡 Fetching gossip...")
-        data = run_solana_cmd(["solana","--url",self.cluster_url,"gossip","--output","json"], desc="gossip")
+        data = run_solana_cmd(["solana","--url",self.cluster_url,"gossip","--output","json"], desc="gossip", critical=True)
         if data is None: logger.error("❌ Gossip unavailable"); return False
         for e in data:
             ip = e.get("ipAddress")
@@ -975,7 +1041,7 @@ class SolanaNetworkAnalyzer:
 
     def _fetch_validators(self):
         logger.info("🔍 Fetching validators...")
-        data = run_solana_cmd(["solana","--url",self.cluster_url,"validators","--output","json"], desc="validators")
+        data = run_solana_cmd(["solana","--url",self.cluster_url,"validators","--output","json"], desc="validators", critical=True)
         if data is None: logger.error("❌ Validators unavailable"); return False
         ts = data.get("totalActiveStake", 0)
         self.cluster_health = {
@@ -1268,18 +1334,36 @@ class SolanaNetworkAnalyzer:
                     f"multicast-groups/{pk}/members?tab=publishers&limit=1000")
                 if members and "items" in members:
                     return code, members["items"]
-                return code, []
+                return code, None  # None = fetch failed, [] = empty but successful
 
+            failed_groups = []
             with ThreadPoolExecutor(max_workers=min(len(active_groups), 5)) as ex:
                 futures = {ex.submit(_fetch_group_publishers, g): g for g in active_groups}
                 for f in as_completed(futures):
                     try:
                         code, items = f.result()
-                        if items:
+                        if items is None:
+                            failed_groups.append(code)
+                        elif items:
                             publishers_data[code] = items
                             logger.info(f"    📡 {code}: {len(items)} publishers")
                     except Exception as e:
                         logger.warning(f"    ⚠️  Publisher fetch error: {e}")
+
+            # Partial merge: if some groups failed, try to recover from stale cache
+            if failed_groups:
+                # Ignore TTL: we'd rather use stale data than lose it entirely
+                stale = self.api_cache.get(all_publishers_cache_key, dz_env, ttl_seconds=10**9)
+                if stale:
+                    recovered = 0
+                    for code in failed_groups:
+                        if code in stale and code not in publishers_data:
+                            publishers_data[code] = stale[code]
+                            recovered += 1
+                    if recovered:
+                        logger.info(f"    ♻️  Recovered {recovered}/{len(failed_groups)} groups from previous cache")
+                logger.warning(f"    ⚠️  {len(failed_groups)} groups failed to fetch: {', '.join(failed_groups[:5])}")
+
             self.api_cache.set(all_publishers_cache_key, dz_env, publishers_data)
 
         # Build lookup maps: IP -> groups, pubkey -> groups
@@ -1638,7 +1722,7 @@ class SolanaNetworkAnalyzer:
 
     def _fetch_epoch(self):
         logger.info("📅 Fetching epoch...")
-        data = run_solana_cmd(["solana","--url",self.cluster_url,"epoch-info","--output","json"], desc="epoch")
+        data = run_solana_cmd(["solana","--url",self.cluster_url,"epoch-info","--output","json"], desc="epoch", critical=True)
         if data:
             self.current_epoch = data.get("epoch"); self.current_slot = data.get("absoluteSlot")
             si, se = data.get("slotIndex",0), data.get("slotsInEpoch",432000)
@@ -2337,7 +2421,7 @@ class SolanaNetworkAnalyzer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Solana Network Decentralization Analyzer v3.6")
+    parser = argparse.ArgumentParser(description="Solana Network Decentralization Analyzer v3.7")
     parser.add_argument("--dbip-key", default=os.getenv("DBIP_KEY",""))
     parser.add_argument("--ipinfo-token", default=os.getenv("IPINFO_TOKEN",""))
     parser.add_argument("--token", default=None, help="(deprecated)")
