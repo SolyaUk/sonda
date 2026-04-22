@@ -1717,10 +1717,10 @@ class SolanaNetworkAnalyzer:
                 identity_pubkey=bam_id,  # use bam_node as unique identity
                 ip_address=ip,
                 role="jito-bam",
-                name=f"jito-bam-{region_short}",
+                name=f"jito-bam-{bam_id}",  # unique across tee rotations (bam_id includes -N-tee suffix)
                 endpoint_provider="jito",
                 endpoint_service="bam",
-                endpoint_label=region_short,
+                endpoint_label=region_short,  # short label (e.g. "amsterdam") for UI
                 endpoint_port=None,
                 endpoint_bam_id=bam_id,
                 endpoint_reachable=reachable,
