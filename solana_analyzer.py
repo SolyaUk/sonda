@@ -1,7 +1,36 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.7
+Solana Network Decentralization Analyzer v3.8
 ==============================================
+Changes from v3.7:
+- DB-IP geolocation fetch made resilient. Previously a single transient error
+  (rate limit, network blip, errorCode in JSON) raised PrimarySourceError that
+  propagated up to fetch_all_data() and crashed the entire analyzer with rc=1,
+  losing the snapshot AND failing to save_batch the IPs that were already
+  successfully fetched in earlier batches. This caused a ~10K daily quota
+  burn on a stable set of ~400 expired IPs that kept being re-fetched without
+  ever being cached.
+  Now:
+   * _q_dbip distinguishes quota errors (DBIPQuotaError, no retry) from
+     transient errors (network/rate limits, retried in smaller batches).
+   * _fetch_dbip wraps each batch in try/except so one failure does not abort
+     the whole fetch. Returns (results_dict, failed_ips_set).
+   * Phase 2 retry: failed IPs from Phase 1 get a second chance with batch
+     size 20. If they fail again, they fall back to secondary sources.
+   * process_ips never propagates DB-IP errors. save_batch is always called
+     with whatever data was collected, ensuring IPs are cached even when
+     DB-IP is unavailable.
+   * fetch_all_data no longer returns False on PrimarySourceError. The
+     analyzer always exits 0 on a complete snapshot, even if DB-IP was
+     partially or fully unavailable.
+- TTL jitter added to avoid thundering-herd expiration of large IP batches
+  cached on the same day:
+   * high confidence:   30 ± 3 days  (was fixed 30)
+   * medium confidence: 15 ± 2 days  (was fixed 15)
+   * low confidence:    7  ± 2 days  (was fixed 7)
+   * DB-IP failed, secondary OK: 3 days fixed (retry sooner)
+   * all sources failed: 1 day fixed (retry tomorrow)
+
 Changes from v3.6:
 - run_solana_cmd: added critical=True mode for unlimited retry with backoff.
   Now used for gossip, validators, and epoch fetches. When Solana RPC returns
@@ -49,6 +78,7 @@ import requests
 import subprocess
 import argparse
 import re
+import random
 import signal
 import logging
 from datetime import datetime, timezone
@@ -197,6 +227,13 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 class PrimarySourceError(Exception):
+    pass
+
+
+class DBIPQuotaError(PrimarySourceError):
+    """Raised when DB-IP daily quota or per-batch quota is exhausted.
+    Subclass of PrimarySourceError so existing handlers still catch it,
+    but allows specific handling (no retry possible until next reset)."""
     pass
 
 
@@ -612,7 +649,7 @@ class GeoCache:
                                 result[ip].cached_at = cat
                             except Exception:
                                 pass  # Skip corrupted entries, will re-fetch
-        except Exception as e: logger.debug(f"Cache read: {e}")
+        except Exception as e: logger.warning(f"⚠️  Geo cache read failed: {e}")
         return result
 
     def save_batch(self, geos):
@@ -624,7 +661,7 @@ class GeoCache:
                 entries.append((g.ip, json.dumps(d), g.ttl_days, now))
             with sqlite3.connect(self.db_path) as c:
                 c.executemany("INSERT OR REPLACE INTO geolocation (ip,data,ttl_days,cached_at) VALUES (?,?,?,?)", entries)
-        except Exception as e: logger.debug(f"Cache write: {e}")
+        except Exception as e: logger.error(f"❌ Geo cache WRITE FAILED — entries lost: {e}")
 
     def stats(self):
         try:
@@ -655,7 +692,7 @@ class APICache:
                     age = int(time.time() - row[1])
                     logger.debug(f"  📦 Cache hit: {source}/{key} (age={age}s)")
                     return json.loads(row[0])
-        except Exception as e: logger.debug(f"API cache read: {e}")
+        except Exception as e: logger.warning(f"⚠️  API cache read failed: {e}")
         return None
 
     def set(self, source, key="default", data=None):
@@ -663,7 +700,7 @@ class APICache:
             with sqlite3.connect(self.db_path) as c:
                 c.execute("INSERT OR REPLACE INTO api_cache (source, key, data, fetched_at) VALUES (?,?,?,?)",
                           (source, key, json.dumps(data, ensure_ascii=False), time.time()))
-        except Exception as e: logger.debug(f"API cache write: {e}")
+        except Exception as e: logger.error(f"❌ API cache WRITE FAILED — entries lost: {e}")
 
     def invalidate(self, source, key=None):
         try:
@@ -702,8 +739,14 @@ def _q_dbip(ips, key):
         if r.status_code == 429: raise PrimarySourceError("DB-IP rate limit (429)")
         if r.status_code != 200: raise PrimarySourceError(f"DB-IP HTTP {r.status_code}")
         data = r.json()
-        if isinstance(data, dict) and "errorCode" in data: raise PrimarySourceError(f"DB-IP: {data.get('error')}")
+        if isinstance(data, dict) and "errorCode" in data:
+            err_msg = str(data.get("error", "")).lower()
+            # Quota errors should not be retried (would only waste more API budget)
+            if "queries left" in err_msg or "exceeded" in err_msg or "quota" in err_msg:
+                raise DBIPQuotaError(f"DB-IP quota: {data.get('error')}")
+            raise PrimarySourceError(f"DB-IP: {data.get('error')}")
         return {ip: data[ip] for ip in ips if ip in data and isinstance(data.get(ip), dict) and "errorCode" not in data[ip]}
+    except DBIPQuotaError: raise
     except PrimarySourceError: raise
     except requests.exceptions.RequestException as e: raise PrimarySourceError(f"DB-IP net: {e}")
     except Exception as e: raise PrimarySourceError(f"DB-IP: {e}")
@@ -738,30 +781,105 @@ class GeolocationService:
         logger.info(f"📍 Cache: {len(cached)} hits, {len(uncached)} to fetch")
         if not uncached: return results
 
-        dbip = self._fetch_dbip(uncached)
+        # Try DB-IP, fall back gracefully on full failure
+        try:
+            dbip, failed_dbip = self._fetch_dbip(uncached)
+        except Exception as e:
+            logger.warning(f"  ⚠️  DB-IP fetch fully failed: {e}, using secondary sources only")
+            dbip, failed_dbip = {}, set(uncached)
+
         ipinfo, geojs = self._fetch_secondary(uncached)
         disc_ips = [ip for ip in uncached if dbip.get(ip,{}).get("countryCode") and ipinfo.get(ip,{}).get("country") and dbip[ip]["countryCode"]!=ipinfo[ip]["country"]]
         ipapi = self._fetch_ipapi(disc_ips) if disc_ips else {}
 
         to_cache = []
         for ip in uncached:
-            geo = self._build(ip, dbip.get(ip), ipinfo.get(ip), geojs.get(ip), ipapi.get(ip))
+            geo = self._build(ip, dbip.get(ip), ipinfo.get(ip), geojs.get(ip), ipapi.get(ip),
+                              dbip_failed=(ip in failed_dbip))
             results[ip] = geo; to_cache.append(geo)
         self.cache.save_batch(to_cache)
         logger.info(f"💾 Cached {len(to_cache)} entries")
+        if failed_dbip:
+            logger.warning(f"  ⚠️  {len(failed_dbip)} IPs cached without DB-IP (short TTL=3d, will retry)")
         logger.info(f"📊 Geo: DB-IP={self.stats['dbip']}, IPInfo={self.stats['ipinfo']}, GeoJS={self.stats['geojs']}, ip-api={self.stats['ipapi']}, disc={self.stats['discrepancies']}")
         return results
 
     def _fetch_dbip(self, ips):
-        if not self.dbip_key: logger.warning("⚠️  No DB-IP key"); return {}
+        """Fetch geolocation data from DB-IP. Returns (results_dict, failed_ips_set).
+
+        Resilient: individual batch failures don't kill the whole fetch.
+        On quota exhaustion: stops cleanly, returns what was collected.
+        On transient failures (rate limits, network blips): collects failed IPs,
+        retries once with smaller batches (size 20) before giving up.
+        """
+        if not self.dbip_key:
+            logger.warning("⚠️  No DB-IP key")
+            return {}, set(ips)
+
         batches = [ips[i:i+DBIP_BATCH_SIZE] for i in range(0, len(ips), DBIP_BATCH_SIZE)]
         logger.info(f"  📡 DB-IP: {len(ips)} IPs, {len(batches)} batches...")
         all_r = {}
+        transient_failed = []  # IPs from batches that failed with non-quota errors
+        quota_hit = False
+
+        # Phase 1: regular batches of DBIP_BATCH_SIZE (100)
         for i, batch in enumerate(batches):
-            if i>0 and i%10==0: logger.info(f"    DB-IP batch {i}/{len(batches)}...")
-            all_r.update(_q_dbip(batch, self.dbip_key)); self.stats["dbip"] += len(batch)
-            if i < len(batches)-1: time.sleep(0.2)
-        logger.info(f"  ✅ DB-IP: {len(all_r)}/{len(ips)}"); return all_r
+            if i > 0 and i % 10 == 0:
+                logger.info(f"    DB-IP batch {i}/{len(batches)}...")
+            if quota_hit:
+                transient_failed.extend(batch)
+                continue
+            try:
+                result = _q_dbip(batch, self.dbip_key)
+                all_r.update(result)
+                self.stats["dbip"] += len(batch)
+            except DBIPQuotaError as e:
+                logger.warning(f"  ⚠️  DB-IP quota exhausted, stopping further fetches: {e}")
+                quota_hit = True
+                transient_failed.extend(batch)
+            except PrimarySourceError as e:
+                logger.warning(f"  ⚠️  DB-IP batch {i+1}/{len(batches)} failed: {e}")
+                transient_failed.extend(batch)
+            if i < len(batches) - 1:
+                time.sleep(0.2)
+
+        # Phase 2: retry transient failures in smaller batches (only if quota not hit)
+        failed_dbip = set()
+        retry_ips = [ip for ip in transient_failed if ip not in all_r]
+        if retry_ips and not quota_hit:
+            retry_batches = [retry_ips[i:i+20] for i in range(0, len(retry_ips), 20)]
+            logger.info(f"  🔁 DB-IP retry: {len(retry_ips)} IPs in {len(retry_batches)} batches (size 20)")
+            recovered = 0
+            for batch in retry_batches:
+                if quota_hit:
+                    failed_dbip.update(batch)
+                    continue
+                try:
+                    result = _q_dbip(batch, self.dbip_key)
+                    all_r.update(result)
+                    self.stats["dbip"] += len(batch)
+                    recovered += len(result)
+                    # IPs in batch not returned by API are per-IP errors → fallback
+                    missing = [ip for ip in batch if ip not in result]
+                    failed_dbip.update(missing)
+                except DBIPQuotaError as e:
+                    logger.warning(f"  ⚠️  DB-IP quota hit during retry: {e}")
+                    quota_hit = True
+                    failed_dbip.update(batch)
+                except PrimarySourceError as e:
+                    logger.debug(f"  Retry batch failed: {e}")
+                    failed_dbip.update(batch)
+                time.sleep(0.3)
+            if recovered:
+                logger.info(f"  ✅ Retry recovered {recovered}/{len(retry_ips)} IPs")
+            if failed_dbip:
+                logger.warning(f"  ⚠️  {len(failed_dbip)} IPs failed DB-IP after retry, using secondary sources")
+        elif quota_hit:
+            # Quota hit during Phase 1: all unrecovered transient_failed go to fallback
+            failed_dbip.update(retry_ips)
+
+        logger.info(f"  ✅ DB-IP: {len(all_r)}/{len(ips)} fetched, {len(failed_dbip)} fallback to secondary")
+        return all_r, failed_dbip
 
     def _fetch_secondary(self, ips):
         ir, gr = {}, {}
@@ -786,7 +904,7 @@ class GeolocationService:
             if r: results[ip] = r; self.stats["ipapi"] += 1
         return results
 
-    def _build(self, ip, dbip, ipinfo, geojs, ipapi):
+    def _build(self, ip, dbip, ipinfo, geojs, ipapi, dbip_failed=False):
         geo = GeolocationData(ip=ip)
         if dbip: geo.sources["dbip"] = dbip
         if ipinfo: geo.sources["ipinfo"] = ipinfo
@@ -864,14 +982,27 @@ class GeolocationService:
                                   "org": ipapi.get("org",""), "asn": ipapi.get("as","")}
             geo.discrepancy_alternatives = alts
 
-        # Confidence
+        # Confidence + dynamic TTL
         uniq = len(set(countries.values())); nsrc = len(countries)
         if uniq <= 1 and nsrc >= 2:
-            geo.confidence, geo.ttl_days = "high", CACHE_TTL_HIGH; self.stats["high"] += 1
+            geo.confidence, base_ttl = "high", CACHE_TTL_HIGH; self.stats["high"] += 1
         elif uniq >= 3 or nsrc < 2:
-            geo.confidence, geo.ttl_days = "low", CACHE_TTL_LOW; self.stats["low"] += 1
+            geo.confidence, base_ttl = "low", CACHE_TTL_LOW; self.stats["low"] += 1
         else:
-            geo.confidence, geo.ttl_days = "medium", DEFAULT_CACHE_DAYS; self.stats["medium"] += 1
+            geo.confidence, base_ttl = "medium", DEFAULT_CACHE_DAYS; self.stats["medium"] += 1
+
+        # TTL strategy:
+        #  - all sources failed → 1 day (retry tomorrow)
+        #  - DB-IP attempted but failed, secondary OK → 3 days (retry sooner, recover when API stable)
+        #  - normal case → base_ttl ± jitter (avoid synchronized expiration of large batches)
+        if not (dbip or ipinfo or geojs):
+            geo.ttl_days = 1
+        elif dbip_failed and not dbip:
+            geo.ttl_days = 3
+        else:
+            jitter = random.randint(-3, 3) if base_ttl >= CACHE_TTL_HIGH else random.randint(-2, 2)
+            geo.ttl_days = max(1, base_ttl + jitter)
+
         return geo
 
 
@@ -996,7 +1127,11 @@ class SolanaNetworkAnalyzer:
             if r.returncode == 0:
                 o = r.stdout
                 cur = "testnet" if "testnet" in o else "devnet" if "devnet" in o else "mainnet-beta" if "mainnet" in o else "unknown"
-                if cur != self.cluster: logger.warning(f"⚠️  CLI={cur}, script={self.cluster.upper()}")
+                # Note: this used to be WARNING, but in our setup --rpc-url is always
+                # passed explicitly (3 clusters analyzed from one host with testnet validator),
+                # so CLI cluster mismatch is the normal case, not an issue. Demoted to debug
+                # on 2026-04-30 to reduce noise.
+                if cur != self.cluster: logger.debug(f"CLI cluster ({cur}) differs from --cluster ({self.cluster.upper()}); using --rpc-url override")
         except: pass
         rpc_note = f" (custom RPC)" if self.cluster_url not in CLUSTER_URLS.values() else ""
         logger.info(f"💡 Cluster: {self.cluster} | RPC: {self.cluster_url}{rpc_note} | Run: {self.run_timestamp}")
@@ -1020,8 +1155,10 @@ class SolanaNetworkAnalyzer:
         self._check_endpoints_reachability()
         self._fetch_epoch()
         try: self._process_geolocation()
+        except DBIPQuotaError as e:
+            logger.warning(f"⚠️  DB-IP quota exhausted: {e}, secondary sources used for new IPs")
         except PrimarySourceError as e:
-            logger.error(f"❌ DB-IP failed: {e}"); return False
+            logger.warning(f"⚠️  DB-IP failed: {e}, secondary sources used")
         self._apply_geo_overrides()
         self._detect_co_hosted(); self._determine_version_status(); self._calculate_superminority()
         return True
