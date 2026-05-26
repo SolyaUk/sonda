@@ -13,7 +13,7 @@
 **Project Twitter:** [@SondaNetwork](https://x.com/SondaNetwork)
 
 > [!NOTE]
-> SONDA is built and maintained by [Solya Validator](https://solya.studio) as a public good. The pipeline runs continuously on production, updating every 60 seconds for mainnet and `alpenglow-community`, every 5 minutes for testnet and devnet. Phase 1 dashboard shipped as part of [Colosseum Frontier 2026](https://colosseum.org/frontier). Phase 2 pages (per-validator, per-datacenter) are in active development.
+> SONDA is built and maintained by [Solya Validator](https://solya.studio) as a public good. The pipeline runs continuously on production, updating every 60 seconds for mainnet and alpenglow-community, every 5 minutes for testnet and devnet. Phase 1 dashboard shipped as part of [Colosseum Frontier 2026](https://colosseum.org/frontier). Phase 2 pages (per-validator, per-datacenter) are in active development.
 
 ---
 
