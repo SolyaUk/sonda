@@ -139,3 +139,5 @@ solana:
     rpc:
       alpenglow-rpc-triton: "alpenglow.rpcpool.com:443"
       alpenglow-rpc-validblocks: "rpc.ag.validblocks.com:443"
+      alpenglow-rpc-ams: "rpc.ag-ams.validator1.net:443"
+      alpenglow-rpc-tyo: "rpc.ag-tyo.validator1.net:443"

@@ -13,7 +13,7 @@
 **Project Twitter:** [@SondaNetwork](https://x.com/SondaNetwork)
 
 > [!NOTE]
-> SONDA is built and maintained by [Solya Validator](https://solya.studio) as a public good. The pipeline runs continuously on production, updating every 60 seconds for mainnet and alpenglow-community, every 5 minutes for testnet and devnet. Phase 1 dashboard shipped as part of [Colosseum Frontier 2026](https://colosseum.org/frontier). Phase 2 pages (per-validator, per-datacenter) are in active development.
+> SONDA is built and maintained by [Solya Validator](https://solya.studio) as a public good. The pipeline runs continuously on production, updating every 60 seconds for mainnet and `alpenglow-community`, every 5 minutes for testnet and devnet. Phase 1 dashboard shipped as part of [Colosseum Frontier 2026](https://colosseum.org/frontier). Phase 2 pages (per-validator, per-datacenter) are in active development.
 
 ---
 
@@ -330,22 +330,15 @@ Structured JSON with predictable field schemas per node role.
 {
   "timestamp": "2026-05-26T09:55:00.000000+00:00",
   "cluster": "alpenglow-community",
-  "epoch": 28,
-  "slot": 1561549,
-  "epoch_completed_percent": 91.76,
+  "epoch": 30,
+  "slot": 1641261,
+  "epoch_completed_percent": 39.37,
   "genesis_hash": "3QWCajStkp68qAAgCjofJ3BpCyYfPQFxSVZppkYrSpju",
   "features": {
-    "total_count": 273,
-    "active_count": 266,
+    "total_count": 278,
+    "active_count": 278,
     "pending_count": 0,
-    "inactive_count": 7,
-    "pending": [],
-    "inactive": [
-      {
-        "id": "2aQJYqER2aKyb3cZw22v4SL2xMX7vwXBRWfvS4pTrtED",
-        "description": "SIMD-0167: Enable Loader-v4"
-      }
-    ]
+    "pending": []
   },
   "record_counts": {
     "validator": 82, "rpc": 4, "infrastructure-node": 2
@@ -361,7 +354,7 @@ Structured JSON with predictable field schemas per node role.
         "confidence": "high", "discrepancy": false
       },
       "version": "0.3.2",
-      "client_type": "Anza (1)",
+      "client_type": "Anza Alpenglow (1)",
       "bls_pubkey": "7B34dCYCh9wkUUmBpxrbNNsuU1gxMjRgLBs6PhDCdzMbJeyUu2tgUPkw7zJLLdobuT",
       "stake_percentage": 1.72,
       "is_rakurai": null,

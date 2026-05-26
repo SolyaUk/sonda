@@ -81,6 +81,8 @@ import re
 import random
 import signal
 import logging
+import base64
+import struct
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Any, Set
 from dataclasses import dataclass, asdict, field
@@ -1132,10 +1134,11 @@ class SolanaNetworkAnalyzer:
         self.rakurai_data = {}
         self.endpoint_records: List[NodeInfo] = []
         self.current_epoch = None; self.current_slot = None; self.epoch_completed_percent = None
+        self.slots_in_epoch = None  # v6.3 — populated by _fetch_epoch, used by _fetch_features
         # v6.1: cluster identity and feature status (used for rollback detection
         # in timeseries and for frontend "pending features" display).
         self.genesis_hash = None
-        self.features = None  # {total_count, active_count, pending_count, inactive_count, pending: [...], inactive: [...]}
+        self.features = None  # {total_count, active_count, pending_count, pending: [...]}
         self.run_timestamp = datetime.now(timezone.utc).isoformat()
         self._check_config()
 
@@ -1251,8 +1254,13 @@ class SolanaNetworkAnalyzer:
         logger.info("📝 Fetching validator-info...")
         data = self.api_cache.get("validator_info", self.cluster, API_TTL["validator_info"])
         if data is None:
-            fm = {"devnet":"-ud","testnet":"-ut","mainnet-beta":"-um"}
-            data = run_solana_cmd(["solana",fm.get(self.cluster,"-um"),"validator-info","get","--output","json"], timeout=20, desc="validator-info")
+            # v6.3: use --url explicitly. Older code used cluster monikers
+            # (`-um`, `-ut`, `-ud`), but those only covered 3 clusters; for
+            # alpenglow-community moniker default fell back to mainnet,
+            # producing 0-2 matches (only validators co-running on both
+            # clusters). --url is the universal way and matches how other
+            # commands in this file address the cluster.
+            data = run_solana_cmd(["solana","--url",self.cluster_url,"validator-info","get","--output","json"], timeout=20, desc="validator-info")
             if not data: logger.warning("⚠️  validator-info unavailable"); return
             self.api_cache.set("validator_info", self.cluster, data)
         else:
@@ -1263,9 +1271,15 @@ class SolanaNetworkAnalyzer:
             if pk and info:
                 for rec in self.records:
                     if rec.identity_pubkey == pk:
+                        # v6.3: use defensive 'if not X' for all fields to
+                        # avoid overwriting with None when a later source
+                        # would have provided a real value, and to be
+                        # consistent across all fields (previously details
+                        # and icon_url overwrote unconditionally).
                         if not rec.name: rec.name = info.get("name")
                         if not rec.website: rec.website = info.get("website")
-                        rec.details = info.get("details"); rec.icon_url = info.get("iconUrl")
+                        if not rec.details: rec.details = info.get("details")
+                        if not rec.icon_url: rec.icon_url = info.get("iconUrl")
                         c += 1; break
         logger.info(f"✅ {c} validator-info applied")
 
@@ -1945,6 +1959,7 @@ class SolanaNetworkAnalyzer:
         if data:
             self.current_epoch = data.get("epoch"); self.current_slot = data.get("absoluteSlot")
             si, se = data.get("slotIndex",0), data.get("slotsInEpoch",432000)
+            self.slots_in_epoch = se  # v6.3 — for activation_slot → epoch conversion in _fetch_features
             self.epoch_completed_percent = (si/se*100) if se else 0
             logger.info(f"✅ Epoch: {self.current_epoch}, Slot: {self.current_slot}, {self.epoch_completed_percent:.1f}%")
 
@@ -1975,79 +1990,190 @@ class SolanaNetworkAnalyzer:
             logger.warning(f"⚠️  Genesis hash error: {e}")
 
     def _fetch_features(self):
-        """Fetch feature status from cluster. Records pending/inactive features
-        for frontend display. Skipped if RPC node fails (non-critical).
-        Output: self.features = {total_count, active_count, pending_count,
-        inactive_count, pending: [...], inactive: [...]}
+        """Fetch feature status from cluster via JSON RPC getProgramAccounts.
+
+        IMPORTANT — why JSON RPC and not `solana feature status`:
+        The CLI binary has a BUILT-IN feature catalog that reflects the
+        version it was compiled against. On the SONDA server we run CLI 4.0.0;
+        when pointing at clusters with different feature sets (especially
+        alpenglow-community), the CLI:
+          - Shows 7-12 catalog ghosts as "inactive" (features that exist in
+            CLI binary but NOT on the cluster) — these are pure CLI artifacts
+          - HIDES features that exist on the cluster but are unknown to the CLI
+
+        This produced ~12 incorrect entries on Alpenglow and a few on
+        mainnet/testnet/devnet. See system prompt section 8.5 "CLI feature
+        catalog bug" for the full diagnosis (May 2026).
+
+        New approach (v6.3+):
+          1. JSON RPC getProgramAccounts with owner = Feature1111...111
+             returns the actual on-chain feature accounts from the cluster.
+             This is the source of truth (active/pending) and accurate count.
+          2. Then call `solana feature status --display-all` (with --display-all
+             flag!) for descriptions — best-effort, may not cover all features
+             but works for most.
+          3. Compute activation_epoch from activation_slot using
+             self.slots_in_epoch.
+
+        Output structure (v6.3 — removed `inactive` field):
+          self.features = {total_count, active_count, pending_count,
+                           pending: [{id, description, activation_epoch}, ...]}
         """
-        logger.info("🎛️  Fetching features...")
+        logger.info("🎛️  Fetching features (JSON RPC)...")
+
+        # Step 1 — get feature accounts via JSON RPC
         try:
-            # solana feature status doesn't support --output json reliably; parse text.
-            # Format per line: <pubkey> | <status> | <activation_slot> | <description>
-            r = subprocess.run(
-                ["solana","--url",self.cluster_url,"feature","status"],
-                capture_output=True, text=True, timeout=30
-            )
-            if r.returncode != 0:
-                logger.warning(f"⚠️  Feature status fetch failed: {r.stderr.strip()[:150]}")
-                return
-
-            active_count = 0
-            pending = []
-            inactive = []
-            for line in r.stdout.splitlines():
-                # Skip headers, footers, blank lines
-                line = line.rstrip()
-                if not line or line.startswith("Feature ") or line.startswith("Software ") \
-                   or line.startswith("Tool ") or line.startswith("---"):
-                    continue
-                # Split on | with stripping
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) < 4:
-                    continue
-                pubkey, status, activation_slot, description = parts[0], parts[1], parts[2], "|".join(parts[3:]).strip()
-                if not pubkey or len(pubkey) < 32:
-                    continue  # not a feature line
-                if status.startswith("active "):
-                    active_count += 1
-                elif status.startswith("pending"):
-                    # "pending until epoch N" — extract N if possible
-                    activation_epoch = None
-                    m = re.search(r"pending until epoch (\d+)", status)
-                    if m:
-                        try: activation_epoch = int(m.group(1))
-                        except ValueError: pass
-                    pending.append({
-                        "id": pubkey,
-                        "description": description,
-                        "activation_epoch": activation_epoch,
-                    })
-                elif status == "inactive":
-                    inactive.append({
-                        "id": pubkey,
-                        "description": description,
-                    })
-
-            total = active_count + len(pending) + len(inactive)
-            self.features = {
-                "total_count": total,
-                "active_count": active_count,
-                "pending_count": len(pending),
-                "inactive_count": len(inactive),
-                "pending": pending,
-                "inactive": inactive,
+            rpc_payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getProgramAccounts",
+                "params": [
+                    "Feature111111111111111111111111111111111111",
+                    {"encoding": "base64"},
+                ],
             }
-            logger.info(f"✅ Features: {active_count} active, {len(pending)} pending, {len(inactive)} inactive")
-            if pending:
-                for p in pending[:3]:
-                    logger.info(f"  ⏳ Pending: {p['description'][:80]}")
-            if inactive:
-                for i in inactive[:3]:
-                    logger.info(f"  ⏸️  Inactive: {i['description'][:80]}")
+            r = requests.post(
+                self.cluster_url,
+                json=rpc_payload,
+                timeout=30,
+                headers={"Content-Type": "application/json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            if "error" in data:
+                logger.warning(f"⚠️  Feature RPC error: {data['error']}")
+                return
+            accounts = data.get("result") or []
+            if not isinstance(accounts, list):
+                logger.warning(f"⚠️  Feature RPC returned unexpected shape: {type(accounts)}")
+                return
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"⚠️  Feature RPC network error: {e}")
+            return
+        except (ValueError, KeyError) as e:
+            logger.warning(f"⚠️  Feature RPC parse error: {e}")
+            return
+
+        logger.info(f"  📡 Got {len(accounts)} feature accounts from cluster")
+
+        # Step 2 — parse activation state from each account's bincode data.
+        # Feature account data layout (bincode Option<u64>):
+        #   - 0x00 → None (pending, not yet activated)
+        #   - 0x01 + 8 bytes LE u64 → Some(activation_slot), so feature is active
+        features_raw = []
+        for entry in accounts:
+            pubkey = entry.get("pubkey")
+            account = entry.get("account") or {}
+            data_field = account.get("data")
+            # Solana returns data as [base64_str, "base64"] tuple
+            if isinstance(data_field, list) and len(data_field) >= 1:
+                data_b64 = data_field[0]
+            elif isinstance(data_field, str):
+                data_b64 = data_field
+            else:
+                data_b64 = ""
+            try:
+                raw_bytes = base64.b64decode(data_b64) if data_b64 else b""
+            except Exception:
+                raw_bytes = b""
+
+            if not raw_bytes:
+                # Empty or malformed account data — skip
+                continue
+
+            discriminator = raw_bytes[0]
+            if discriminator == 0:
+                # Pending — feature exists on chain but not yet activated
+                features_raw.append({
+                    "id": pubkey,
+                    "status": "pending",
+                    "activation_slot": None,
+                })
+            elif discriminator == 1 and len(raw_bytes) >= 9:
+                # Active — activation_slot is bytes 1..9 as little-endian u64
+                slot = struct.unpack("<Q", raw_bytes[1:9])[0]
+                features_raw.append({
+                    "id": pubkey,
+                    "status": "active",
+                    "activation_slot": slot,
+                })
+            # Otherwise — unknown format, skip silently
+
+        # Step 3 — best-effort descriptions via CLI with --display-all.
+        # --display-all is critical: without it, CLI hides "old" active features
+        # and we'd only get descriptions for recently activated ones.
+        descriptions = {}
+        try:
+            cli_r = subprocess.run(
+                ["solana","--url",self.cluster_url,"feature","status","--display-all"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if cli_r.returncode == 0:
+                for line in cli_r.stdout.splitlines():
+                    line = line.rstrip()
+                    if not line or line.startswith("Feature ") or line.startswith("Software ") \
+                       or line.startswith("Tool ") or line.startswith("---") \
+                       or line.startswith("To "):
+                        continue
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) < 4:
+                        continue
+                    pk = parts[0]
+                    if not pk or len(pk) < 32:
+                        continue
+                    desc = "|".join(parts[3:]).strip()
+                    if desc:
+                        descriptions[pk] = desc
+                logger.info(f"  📝 Got {len(descriptions)} feature descriptions from CLI")
+            else:
+                logger.warning(f"⚠️  CLI feature status returned {cli_r.returncode} — descriptions unavailable")
         except subprocess.TimeoutExpired:
-            logger.warning("⚠️  Feature status timeout after 30s")
+            logger.warning("⚠️  CLI feature status timeout — descriptions unavailable")
         except Exception as e:
-            logger.warning(f"⚠️  Feature status error: {e}")
+            logger.warning(f"⚠️  CLI feature status error: {e} — descriptions unavailable")
+
+        # Step 4 — categorize and enrich
+        active_count = 0
+        pending = []
+        for f in features_raw:
+            f["description"] = descriptions.get(f["id"])  # may be None
+            if f["status"] == "active":
+                active_count += 1
+            else:  # pending
+                # Compute activation_epoch placeholder — pending features have
+                # no activation slot yet, so we don't know when they'll activate
+                pending.append({
+                    "id": f["id"],
+                    "description": f["description"],
+                    "activation_epoch": None,
+                })
+
+        # NOTE on semantics (v6.3):
+        # "pending" = feature accounts exist on the cluster (returned by
+        # getProgramAccounts) but their bincode discriminator is 0, meaning
+        # the activation_slot is None. These are features ready to activate
+        # at the next epoch boundary if validators agree.
+        #
+        # Pre-v6.3 the output also contained "inactive" (and inactive_count)
+        # which under the CLI-based implementation meant "features in CLI
+        # binary's hardcoded catalog that aren't active on the cluster".
+        # That field is removed in v6.3 because it conflated two things:
+        #   (a) real pending features on the cluster (now in `pending`)
+        #   (b) CLI catalog ghosts — features in the CLI binary that don't
+        #       exist on the cluster at all (these were always noise)
+        # Frontend integrations should use `pending` and `pending_count`.
+
+        total = active_count + len(pending)
+        self.features = {
+            "total_count": total,
+            "active_count": active_count,
+            "pending_count": len(pending),
+            "pending": pending,
+        }
+        logger.info(f"✅ Features: {active_count} active, {len(pending)} pending (total {total})")
+        if pending:
+            for p in pending[:5]:
+                desc = p.get("description") or "(no description in CLI catalog)"
+                logger.info(f"  ⏳ Pending: {p['id'][:12]}... {desc[:70]}")
 
     def _fetch_bls_pubkeys(self):
         """Fetch BLS Public Keys for all validators (Alpenglow-only for now).
@@ -2694,6 +2820,7 @@ class SolanaNetworkAnalyzer:
                 "bls_pubkey": rec.bls_pubkey,
                 "website": rec.website,
                 "icon_url": rec.icon_url,
+                "details": rec.details,  # v6.3 — was missing from output despite being set in _fetch_validator_info
                 "bam_node": rec.bam_node,
                 "bam_region": rec.bam_region,
                 "ibrl": {
