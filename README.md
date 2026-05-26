@@ -2,65 +2,93 @@
 
 **Solana Observatory for Network Decentralization Analysis**
 
-> Multi-source geo-verified analysis of validator distribution, infrastructure mapping, and network health metrics for the Solana blockchain.
+> Network analytics and tactical infrastructure intelligence for Solana validator operators.
 
-[![Status](https://img.shields.io/badge/status-work_in_progress-yellow)]()
+[![Status](https://img.shields.io/badge/status-live-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.10+-blue)]()
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-🌐 Dashboard (coming soon): [sonda.network](https://sonda.network)
+**Live dashboard:** [sonda.network](https://sonda.network)
+**Public data:** [data.sonda.network](https://data.sonda.network/current/mainnet-beta/)
+**Project Twitter:** [@SondaNetwork](https://x.com/SondaNetwork)
 
 > [!NOTE]
-> SONDA is under active development. The core analyzer and historical data collector are production-ready and tested on mainnet.
-> The public dashboard and automation layer are coming next.
+> SONDA is built and maintained by [Solya Validator](https://solya.studio) as a public good. The pipeline runs continuously on production, updating every 60 seconds for mainnet and alpenglow-community, every 5 minutes for testnet and devnet. Phase 1 dashboard shipped as part of [Colosseum Frontier 2026](https://colosseum.org/frontier). Phase 2 pages (per-validator, per-datacenter) are in active development.
+
+---
+
+## Contents
+
+- [Why SONDA?](#why-sonda)
+- [Who is this for?](#who-is-this-for)
+- [What SONDA Analyzes](#what-sonda-analyzes)
+- [Repository Layout](#repository-layout)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Output Format](#output-format)
+- [Production Status](#production-status)
+- [Roadmap](#roadmap)
+- [Built By](#built-by)
+- [Contributing](#contributing)
 
 ---
 
 ## Why SONDA?
 
-Solana has dozens of dashboards. Most pull data from a single source and display it as-is. **SONDA takes a fundamentally different approach:**
+SONDA is built for a specific question: how to make tactical decisions about Solana validator infrastructure. Operators face concrete trade-offs every week, and the data needed to answer them is scattered across half a dozen tools.
 
-- **Cross-verified geolocation.** Every IP is checked against 4 independent geo providers (DB-IP, IPInfo, GeoJS, ip-api). Discrepancies are detected, logged, and resolved — not silently averaged. Protocol-verified locations from DoubleZero devices serve as ground truth.
+**Tactical placement for operators.** Where should the next validator node go? Which cities and ASNs already concentrate too much stake? Which datacenters have a track record of stability versus recurring delinquency? SONDA aggregates the data you would otherwise collect by hand.
 
-- **Complete infrastructure mapping.** Not just validators. SONDA maps the full network topology: RPC nodes, DoubleZero devices, BAM nodes, Jito block engines, Harmonic auction engines, NTP servers, shred receivers, co-hosted nodes, and more — each with their own role classification and field schema.
+**Per-validator and per-datacenter history.** Validators move datacenters. Operators switch to backup nodes. ASNs grow and shrink. SONDA tracks all of this over time, with location history going back to epoch 196 (2021). Per-validator and per-datacenter pages are rolling out in Phase 2.
 
-- **Multi-dimensional decentralization metrics.** Nakamoto coefficient alone doesn't tell the full story. SONDA computes Nakamoto, HHI, Gini, and Shannon entropy across 4 dimensions simultaneously (country, ASN, city, validator) — revealing concentration patterns that single-metric tools miss entirely.
+**Verified data foundation.** Every IP is checked against four independent geolocation providers (DB-IP, IPInfo, GeoJS, ip-api), with DoubleZero device locations used as protocol-verified ground truth. Without this foundation, every map and metric on top of it would inherit the errors of whichever single source was chosen.
 
-- **MEV ecosystem visibility.** BAM (Block Auction Marketplace) integration with IBRL performance scores, Rakurai validator detection, Jito infrastructure mapping — showing who builds blocks, how fast, and where.
+**Multi-cluster coverage.** Mainnet, testnet, devnet, and the experimental `alpenglow-community` cluster where Anza is testing the Alpenglow consensus algorithm. Each cluster looks very different. SONDA covers all four with the same pipeline.
 
-- **Historical location tracking.** Per-validator datacenter timeline going back to epoch ~196 (2021). Where has each validator hosted? For how long? Which datacenters do they share? No other tool has this.
+**Decentralization metrics as foundation, not headline.** Nakamoto, HHI, Gini, and Shannon entropy across four dimensions (country, ASN, city, validator) are computed every cycle and published as part of the data. They support the tactical pages rather than being the primary product.
+
+---
+
+## Who is this for?
+
+| Audience | What SONDA gives them |
+|---|---|
+| **Validator operators** (primary) | Tactical decisions on placement, datacenter and ASN selection, backup-node patterns, infrastructure timing |
+| **Stake pool operators** | Due diligence on validator candidates, datacenter and provider risk visibility |
+| **Researchers and journalists** | Measurable decentralization data across four dimensions, full historical context |
+| **SOL stakers** | Where stake actually concentrates, which providers and regions dominate |
 
 ---
 
 ## What SONDA Analyzes
 
-### Network Nodes (~5,000+ per scan)
+### Network Nodes (5,000+ per scan on mainnet)
 
 | Category | Description |
 |---|---|
 | Validators | Active, hidden (no gossip), inactive (delinquent) |
 | RPC Nodes | Public RPC endpoints in gossip |
 | DoubleZero | DZ devices, connected validators, multicast groups |
-| BAM/Jito | Block engines, shred receivers, NTP servers, BAM nodes |
+| BAM / Jito | Block engines, shred receivers, NTP servers, BAM nodes |
 | Harmonic | Auction engines, TPU relayers, bundles |
-| Infrastructure | Entrypoints, co-hosted nodes, backup nodes |
+| Other | Entrypoints, co-hosted nodes, backup nodes |
 
-### Geolocation (4-source cross-verification)
+### Geolocation: 4-source cross-verification
 
 ```
-DB-IP (primary) ──→ IPInfo ──→ GeoJS ──→ ip-api (discrepancies only)
-                                              │
-                              DoubleZero ─────┘ (protocol-verified ground truth)
+DB-IP ───── IPInfo ───── GeoJS ───── ip-api (used only for discrepancies)
+                                       │
+                       DoubleZero ─────┘  (protocol-verified ground truth)
 ```
 
-Each IP receives a confidence score (high/medium/low) based on source agreement. Discrepancies are preserved with full alternatives for audit. Geo overrides from DZ devices automatically correct mislocated carrier IPs.
+Each IP receives a confidence score (high, medium, low) based on source agreement. Discrepancies are preserved with full alternatives for audit. Geo overrides from DZ devices automatically correct mislocated carrier IPs.
 
 ### Decentralization Metrics
 
 | Metric | Dimensions | What it reveals |
 |---|---|---|
 | **Nakamoto Coefficient** | Country, ASN, City, Validator | Minimum entities to control 33% of stake |
-| **Superminority** | Country, ASN, Validator (at 33/50/66%) | Geographic and organizational concentration thresholds |
+| **Superminority** | Country, ASN, Validator (at 33 / 50 / 66%) | Geographic and organizational concentration thresholds |
 | **HHI** | Country, ASN, Validator | Market concentration (competitive vs monopolistic) |
 | **Gini Coefficient** | Validators | Stake inequality distribution |
 | **Shannon Entropy** | Country, ASN, Validator | Diversity and evenness of distribution |
@@ -69,54 +97,119 @@ Each IP receives a confidence score (high/medium/low) based on source agreement.
 
 | Source | Data |
 |---|---|
-| **DoubleZero** | Device locations, validator connections, multicast groups (9 groups) |
+| **DoubleZero** | Device locations, validator connections, multicast groups |
 | **BAM** | Node topology, validator mapping, IBRL performance scores, stake % |
 | **Rakurai** | MEV-optimized validator detection, geo distribution |
 | **Trillium** | Client types, vote latency, slot duration, SFDP status |
-| **Endpoints** | 90+ infrastructure endpoints with differentiated reachability checks |
+| **Endpoints** | 90+ infrastructure endpoints with per-service reachability checks |
+| **Alpenglow** | BLS pubkey adoption, feature activation status, genesis hash, rollback detection |
+
+---
+
+## Repository Layout
+
+```
+sonda/
+├── analyzer/                       Core network analysis pipeline
+│   ├── solana_analyzer.py          Real-time snapshot collector (2,800 lines)
+│   ├── solana_history.py           Historical geo data collector (1,250 lines)
+│   ├── endpoints.yaml              Infrastructure endpoint configuration
+│   ├── geo_overrides.yaml          DZ-verified location overrides
+│   └── README.md                   Detailed usage and reference
+│
+├── automation/                     Orchestration and pipeline glue
+│   ├── run_sonda.py                Multi-cluster orchestrator (systemd entry point)
+│   ├── run_once.py                 Single-cluster pipeline for testing
+│   ├── split_snapshot.py           Splits 5MB snapshot into per-role files
+│   ├── split_history.py            Splits history into per-validator files
+│   ├── r2_upload.py                Cloudflare R2 upload (multi-mode)
+│   ├── timeseries.py               SQLite state tracking, event detection
+│   ├── telegram.py                 Public and debug bot notifications
+│   ├── config.example.yaml         Configuration template
+│   └── README.md                   Configuration and operation guide
+│
+├── systemd/                        Service definitions
+│   ├── sonda.service               systemd unit (multi-worker orchestrator)
+│   ├── sonda-logrotate             Log rotation config
+│   └── README.md                   Installation and troubleshooting
+│
+├── .githooks/pre-commit            Blocks accidental secret commits
+├── .gitignore                      Protects config.yaml with real keys
+├── LICENSE                         MIT
+└── README.md                       This file
+```
+
+`sonda_data/` (snapshots, SQLite, history, R2 staging) lives separately at `/home/solya/sonda_data/` on the production server. Not part of this repository.
 
 ---
 
 ## Architecture
 
+### Real-time pipeline
+
 ```
-solana_analyzer.py          Real-time network snapshot (~2,400 lines)
-├── Data Collection         Gossip, validators, epoch from Solana CLI
-├── External APIs           Trillium, BAM, Rakurai, DoubleZero (Malbec)
-├── Geolocation Engine      4-source with adaptive TTL cache (SQLite)
-├── Geo Overrides           DZ-verified locations + admin overrides
-├── API Cache               Per-source TTL (2min → 4hr) in SQLite
-├── Metrics Calculator      Nakamoto, HHI, Gini, Shannon, Superminority
-├── Infrastructure Map      BAM nodes, IBRL, DZ multicast, Rakurai
-└── JSON Export             Structured output (~5.6 MB per scan)
-
-solana_history.py           Historical geo data collector (~1,250 lines)
-├── Jito kobe API           IP per epoch (~500+), parallel fetch ~40s
-├── SFDP API                ASN + datacenter per epoch (~196+)
-├── RIPE Stat / DB-IP       ASN name enrichment for historical records
-├── SQLite cache            SFDP responses cached permanently (historical = immutable)
-├── Resume / Update         Fault-tolerant: resume interrupted runs, incremental updates
-└── JSON Export             Per-validator location_changes timeline (~4 MB, mainnet)
-
-endpoints.yaml              Infrastructure endpoint configuration
-geo_overrides.yaml          Auto-generated DZ overrides + admin entries
+run_sonda.py (systemd)
+    │
+    ├── Worker [mainnet-beta]            60s interval
+    ├── Worker [testnet]                 300s interval
+    ├── Worker [devnet]                  300s interval
+    └── Worker [alpenglow-community]     60s interval
+            │
+            ▼
+        Each worker cycle:
+        ┌─────────────────────────────────────────┐
+        │  1. analyzer/solana_analyzer.py         │
+        │     ├── Gossip + validators (Solana CLI)│
+        │     ├── Genesis hash, features          │
+        │     ├── BLS pubkeys (Alpenglow only)    │
+        │     ├── External APIs (BAM, DZ, etc.)   │
+        │     ├── 4-source geolocation engine     │
+        │     └── Write snapshot JSON (~5MB)      │
+        │                                          │
+        │  2. automation/split_snapshot.py        │
+        │     └── 4 role-specific JSON files      │
+        │                                          │
+        │  3. automation/r2_upload.py             │
+        │     └── Push to data.sonda.network      │
+        │                                          │
+        │  4. automation/timeseries.py            │
+        │     ├── Diff against previous state     │
+        │     ├── Record node_changes, ip_changes │
+        │     ├── Detect cluster rollback         │
+        │     └── Record epoch snapshot on wrap   │
+        │                                          │
+        │  5. automation/telegram.py              │
+        │     └── Send events to bot channels     │
+        └─────────────────────────────────────────┘
 ```
 
-### API Cache TTL Strategy
+### Cluster rollback detection
 
-Not all data changes at the same rate. SONDA caches intelligently:
+The `alpenglow-community` cluster experiences regenesis events approximately weekly and snapshot-based restarts more frequently. SONDA's timeseries layer distinguishes three rollback types using `genesis_hash`, `epoch`, and `slot`:
+
+| Scenario | Signal | Response |
+|---|---|---|
+| **Regenesis** | genesis_hash changed | Skip all comparisons, warn |
+| **Epoch rollback** | Same genesis, lower epoch | Skip epoch comparison, warn |
+| **Slot rollback within epoch** | Same genesis, same epoch, lower slot | Info-level log |
+
+The same logic protects other clusters from incorrect epoch summaries during rare restart events.
+
+### API cache TTL strategy
+
+Not all data changes at the same rate. SONDA caches intelligently.
 
 | Source | TTL | Rationale |
 |---|---|---|
-| Gossip, Validators, Epoch | Always fresh | Core monitoring — never cached |
+| Gossip, Validators, Epoch | Always fresh | Core monitoring, never cached |
 | DZ devices, users, multicast | 2 min | Real-time infrastructure awareness |
 | BAM validators, nodes | 2 min | Fast-changing connections |
 | Trillium | 30 min | Updates several times per epoch |
 | Rakurai | 1 hour | Validator list changes slowly |
 | BAM IBRL, stake | 1 hour | Calculated per epoch |
 | validator-info | 4 hours | On-chain, rarely changes |
-| Geolocation | 7–30 days | Separate SQLite DB, adaptive TTL |
-| SFDP epoch data | Permanent | Historical data — never changes |
+| Geolocation | 7 to 30 days | Adaptive TTL with jitter, separate SQLite DB |
+| SFDP epoch data | Permanent | Historical data, never changes |
 
 ---
 
@@ -125,91 +218,137 @@ Not all data changes at the same rate. SONDA caches intelligently:
 ### Prerequisites
 
 - Python 3.10+
-- Solana CLI (`solana` in PATH)
-- Optional: `doublezero` CLI (for DZ data), `ntplib` (for NTP checks)
+- Solana CLI in PATH
+- Optional: `doublezero` CLI for DZ data
+- For automation: Cloudflare R2 bucket, Telegram bots, DB-IP and IPInfo accounts
 
-### Installation
+### Standalone analyzer (no automation needed)
+
+For a single one-off scan of any cluster:
 
 ```bash
 git clone https://github.com/SolyaUk/sonda.git
 cd sonda
+pip install requests pyyaml boto3
 
-pip install requests pyyaml ntplib
+# Mainnet scan
+python3 analyzer/solana_analyzer.py \
+    --cluster mainnet-beta \
+    --dbip-key YOUR_DBIP_KEY \
+    --ipinfo-token YOUR_IPINFO_TOKEN \
+    --endpoints analyzer/endpoints.yaml \
+    --geo-overrides analyzer/geo_overrides.yaml \
+    --export \
+    --output /tmp/snapshot.json
+
+# Alpenglow community cluster
+python3 analyzer/solana_analyzer.py \
+    --cluster alpenglow-community \
+    --rpc-url http://YOUR_ALPENGLOW_NODE:8899 \
+    --dbip-key YOUR_DBIP_KEY \
+    --ipinfo-token YOUR_IPINFO_TOKEN \
+    --endpoints analyzer/endpoints.yaml \
+    --export \
+    --output /tmp/snapshot-alpenglow.json
 ```
 
-### Usage — Real-time Analyzer
+### Historical data collector
+
+For per-validator location history back to epoch 196 (2021):
 
 ```bash
-# Basic analysis (mainnet)
-python solana_analyzer.py \
-  --dbip-key YOUR_DBIP_KEY \
-  --ipinfo-token YOUR_IPINFO_TOKEN \
-  --endpoints endpoints.yaml \
-  --geo-overrides geo_overrides.yaml \
-  --export --output analysis.json
+mkdir -p ~/sonda_data/imports
+cd ~/sonda_data/imports
 
-# Custom RPC endpoint
-python solana_analyzer.py \
-  --rpc-url https://your-rpc.com \
-  --dbip-key YOUR_KEY \
-  --export --output analysis.json
+# Initial collection for mainnet (takes around 6 hours, resumable)
+python3 ~/sonda/analyzer/solana_history.py \
+    --cluster mainnet-beta \
+    --dbip-key YOUR_DBIP_KEY \
+    --ipinfo-token YOUR_IPINFO_TOKEN
 
-# Testnet / Devnet
-python solana_analyzer.py --cluster testnet --export
+# Resume after interruption (Jito phase re-fetches in 40s, SFDP continues from checkpoint)
+python3 ~/sonda/analyzer/solana_history.py --resume
+
+# Incremental update later (add new epochs, preserve all SFDP data)
+python3 ~/sonda/analyzer/solana_history.py --update --dbip-key YOUR_KEY
 ```
 
-### Usage — Historical Data Collector
+See [`analyzer/README.md`](analyzer/README.md) for the full collection-to-R2-upload workflow.
+
+### Full production automation
+
+For a continuously-running, multi-cluster, R2-publishing, Telegram-alerting deployment:
 
 ```bash
-# Initial collection (mainnet) — takes ~6h for SFDP phase, resumable
-python solana_history.py \
-  --dbip-key YOUR_DBIP_KEY \
-  --ipinfo-token YOUR_IPINFO_TOKEN
+# 1. Set up directories
+mkdir -p ~/sonda_data/{snapshots,backups,current,history,imports}
+mkdir -p ~/sonda/automation/logs
 
-# Resume interrupted collection (Jito re-fetched in ~40s, SFDP continues from checkpoint)
-python solana_history.py --resume
+# 2. Configure
+cp automation/config.example.yaml automation/config.yaml
+nano automation/config.yaml   # Fill in API keys, R2 credentials, Telegram tokens
 
-# Incremental update — add new epochs from Jito, preserve all SFDP data
-python solana_history.py --update --dbip-key YOUR_DBIP_KEY
+# 3. Install systemd service (one-time)
+sudo ln -s ~/sonda/systemd/sonda.service /etc/systemd/system/sonda.service
+sudo cp ~/sonda/systemd/sonda-logrotate /etc/logrotate.d/sonda
+sudo chown root:root /etc/logrotate.d/sonda
+sudo systemctl daemon-reload
+sudo systemctl enable sonda.service
 
-# Other clusters
-python solana_history.py --cluster testnet --dbip-key YOUR_KEY
-python solana_history.py --cluster devnet   # creates empty output
+# 4. Enable pre-commit hook (one-time, after cloning)
+git config core.hooksPath .githooks
 
-# Recommended for long runs (protected from session disconnect)
-nohup python solana_history.py ... > history.log 2>&1 &
-tail -f history.log
+# 5. Start
+sudo systemctl start sonda.service
+journalctl -u sonda.service -f
 ```
 
-### API Keys
+Detailed operational instructions: [`systemd/README.md`](systemd/README.md), [`automation/README.md`](automation/README.md).
 
-| Service | Required for | Free Tier |
+### API keys
+
+| Service | Required for | Free tier |
 |---|---|---|
-| [DB-IP](https://db-ip.com/) | Primary geo + ASN lookup | 10K lookups/day |
+| [DB-IP](https://db-ip.com/) | Primary geo + ASN lookup | 1K lookups/day on free tier (paid Starter plan: 10K/day with Extended API) |
 | [IPInfo](https://ipinfo.io/) | Secondary geo verification | 50K lookups/month |
-| GeoJS | Tertiary geo (auto, no key) | Unlimited |
-| ip-api | Discrepancy resolution (auto) | 45 req/min |
-| RIPE Stat | ASN name lookup (auto, no key) | Unlimited |
+| GeoJS | Tertiary geo (no key needed) | Unlimited |
+| ip-api | Discrepancy resolution (no key needed) | 45 req/min |
+| RIPE Stat | ASN name lookup (no key needed) | Unlimited |
+| [Cloudflare R2](https://cloudflare.com/products/r2/) | Public data hosting (automation only) | 10 GB storage free |
+| [Helius](https://helius.dev/) | Recommended mainnet RPC (automation) | 1M credits/month on free tier (paid Developer plan: 10M/month) |
+| [Telegram BotFather](https://t.me/BotFather) | Notification bots (automation only) | Free |
 
 ---
 
 ## Output Format
 
-### Real-time Snapshot (`solana_analyzer.py`)
+### Real-time snapshot (`solana_analyzer.py`)
 
-SONDA produces a structured JSON with predictable field schemas per node role:
+Structured JSON with predictable field schemas per node role.
 
 ```json
 {
-  "timestamp": "2026-03-02T18:21:14.432854+00:00",
-  "cluster": "mainnet-beta",
-  "epoch": 934,
-  "slot": 403773442,
-  "epoch_completed_percent": 66.07,
+  "timestamp": "2026-05-26T09:55:00.000000+00:00",
+  "cluster": "alpenglow-community",
+  "epoch": 28,
+  "slot": 1561549,
+  "epoch_completed_percent": 91.76,
+  "genesis_hash": "3QWCajStkp68qAAgCjofJ3BpCyYfPQFxSVZppkYrSpju",
+  "features": {
+    "total_count": 273,
+    "active_count": 266,
+    "pending_count": 0,
+    "inactive_count": 7,
+    "pending": [],
+    "inactive": [
+      {
+        "id": "2aQJYqER2aKyb3cZw22v4SL2xMX7vwXBRWfvS4pTrtED",
+        "description": "SIMD-0167: Enable Loader-v4"
+      }
+    ]
+  },
   "record_counts": {
-    "validator": 773, "validator-hidden": 3, "validator-inactive": 27,
-    "rpc": 204, "co-hosted": 2, "dz-device": 95,
-    "jito-block-engine": 36, "jito-shred-receiver": 8, "jito-bam": 12
+    "validator": 82, "rpc": 4, "infrastructure-node": 2
   },
   "records": [
     {
@@ -218,12 +357,15 @@ SONDA produces a structured JSON with predictable field schemas per node role:
       "ip_address": "1.2.3.4",
       "geolocation": {
         "country_code": "US", "city": "Ashburn",
+        "asn": "AS24940", "asn_name": "HETZNER-AS",
         "confidence": "high", "discrepancy": false
       },
-      "is_rakurai": true,
-      "bam_node": "ny-mainnet-bam-1-tee",
-      "ibrl": { "ibrl_score": 97.2, "median_block_build_ms": 362 },
-      "dz_connected": true, "dz_device_name": "frankry"
+      "version": "0.3.2",
+      "client_type": "Anza (1)",
+      "bls_pubkey": "7B34dCYCh9wkUUmBpxrbNNsuU1gxMjRgLBs6PhDCdzMbJeyUu2tgUPkw7zJLLdobuT",
+      "stake_percentage": 1.72,
+      "is_rakurai": null,
+      "dz_connected": false
     }
   ],
   "metrics": {
@@ -239,9 +381,11 @@ SONDA produces a structured JSON with predictable field schemas per node role:
 }
 ```
 
-### Historical Timeline (`solana_history.py`)
+Three new top-level fields versus older versions: `genesis_hash`, `features`, and per-validator `bls_pubkey`. The first two are populated for every cluster. `bls_pubkey` is currently populated only for `alpenglow-community` (SIMD-0387 active there); other clusters will follow once the VAT feature activates.
 
-Per-validator datacenter history from epoch ~196 (2021) to present:
+### Historical timeline (`solana_history.py`)
+
+Per-validator datacenter history from epoch 196 (2021) to present.
 
 ```json
 {
@@ -272,14 +416,6 @@ Per-validator datacenter history from epoch ~196 (2021) to present:
           "region": "Quebec", "latitude": 45.50, "longitude": -73.57,
           "asn": "AS16276", "asn_name": "OVH", "isp": "Ovh Sas",
           "source": "jito"
-        },
-        {
-          "from_epoch": 805, "to_epoch": 947,
-          "ip": "216.238.110.55",
-          "country_code": "BR", "city": "São Paulo",
-          "asn": "AS20473", "asn_name": "AS-VULTR",
-          "isp": "The Constant Company",
-          "source": "jito"
         }
       ]
     }
@@ -287,27 +423,105 @@ Per-validator datacenter history from epoch ~196 (2021) to present:
 }
 ```
 
+### Public data on Cloudflare R2
+
+The automation pipeline publishes split files to `data.sonda.network` on every cycle.
+
+```
+data.sonda.network/
+├── current/
+│   ├── mainnet-beta/
+│   │   ├── network_summary.json     ~100 KB (meta + metrics, no records)
+│   │   ├── validators.json          ~1.2 MB (~780 validators)
+│   │   ├── rpc.json                 ~130 KB
+│   │   └── infrastructure.json      ~160 KB (DZ, BAM, Jito, Harmonic)
+│   ├── testnet/
+│   ├── devnet/
+│   └── alpenglow-community/
+├── history/
+│   ├── mainnet-beta/
+│   │   ├── _index.json
+│   │   └── {identity}.json          ~5 KB each, 787 files
+│   ├── testnet/                     761 files
+│   └── devnet/                      36 files (mostly empty)
+└── backups/
+    └── timeseries-YYYY-MM-DD.db.gz  Nightly SQLite backups
+```
+
+---
+
+## Production Status
+
+| Component | Status | Notes |
+|---|---|---|
+| Real-time analyzer | Live | Running every 60s (mainnet, alpenglow-community), 300s (testnet, devnet) |
+| Historical collector | Complete | Initial pull done April 2026; re-runnable for gap fills |
+| Multi-source geolocation | Live | DB-IP Starter plan + IPInfo + GeoJS + ip-api |
+| Cluster rollback detection | Live | Three-type detection deployed May 2026 with Alpenglow integration |
+| BLS pubkey tracking | Live | Currently `alpenglow-community` only |
+| systemd service | Live | 4 workers, auto-restart, daily log rotation |
+| Cloudflare R2 publishing | Live | data.sonda.network, public read |
+| Telegram notifications | Live | Debug bot (private) + SONDA Network Events (public) |
+| Public dashboard Phase 1 | Live | sonda.network, all 4 clusters |
+| Per-validator pages | In progress | Phase 2 |
+| Per-datacenter pages | In progress | Phase 2 |
+
 ---
 
 ## Roadmap
 
-- [x] **Core Analyzer** — Multi-source geolocation, role classification, metrics engine
-- [x] **Infrastructure Mapping** — BAM, DoubleZero, Rakurai, Jito, Harmonic
-- [x] **API Cache** — SQLite with per-source TTL strategy
-- [x] **Geo Overrides** — DZ-verified + admin overrides with full audit trail
-- [x] **Historical Collector** — Per-validator datacenter timeline back to epoch 196 (2021)
-- [x] **Resume / Update** — Fault-tolerant collection with incremental epoch updates
-- [ ] **Automation** — Cron scheduling, snapshot history, failure monitoring
-- [ ] **Public Dashboard** — Interactive visualization at [sonda.network](https://sonda.network)
-- [ ] **Historical Trends** — Epoch-over-epoch comparisons, stability scores
+**Phase 1 (delivered)**
+- Core analyzer with 4-source geolocation
+- Infrastructure mapping for BAM, DoubleZero, Rakurai, Jito, Harmonic
+- API cache with per-source TTL strategy
+- Geo overrides with full audit trail
+- Historical collector back to 2021
+- Resume and update modes for fault-tolerant collection
+- Multi-cluster automation (mainnet, testnet, devnet, `alpenglow-community`)
+- Public dashboard at sonda.network
+
+**Phase 2 (in development)**
+- Per-validator pages with field-change timeline and location history
+- Per-datacenter pages with hosting analytics and incident history
+- Epoch snapshot auto-push to R2 with full backfill
+- Cluster-wide time series (Nakamoto, HHI, Gini trends)
+- Endpoint health uptime API
+
+**Phase 3 (planned)**
+- BLS pubkey adoption tracking expanded to all clusters once SIMD-0357 (VAT) activates
+- RPC fallback chain for the `alpenglow-community` cluster
+- Infrastructure health score (synthetic SONDA metric for validator ranking)
+- Public API access with JSON exports
+- Attribution program for downstream tools
+
+**Phase 4 and beyond**
+- Synthetic Validator Score and Datacenter Score composites
+- Embeddable widgets, custom alerts, watchlists
+- Internationalization
 
 ---
 
 ## Built By
 
-Created by **[Solya Validator](https://solya.studio)** — an independent Solana validator committed to network health, transparency, and decentralization.
+Created and maintained by [Solya Validator](https://solya.studio), an independent Solana validator running since September 2021. Currently hosted in Singapore (AS20473 Vultr/Edgevana, same provider as São Paulo). Relocated in May 2026.
 
-Identity: [`HwcVgFSgmfeeF7zGFUBLoVA8Hpx8rtwyfCrJ1npBaSVC`](https://stakewiz.com/validator/HwcVgFSgmfeeF7zGFUBLoVA8Hpx8rtwyfCrJ1npBaSVC)
+Identity: `HwN6eoEe9N3kwHi66hpQDBMFPk6ASQGthWKPX5MZmisp`
+Vote: [`HwcVgFSgmfeeF7zGFUBLoVA8Hpx8rtwyfCrJ1npBaSVC`](https://stakewiz.com/validator/HwcVgFSgmfeeF7zGFUBLoVA8Hpx8rtwyfCrJ1npBaSVC)
+
+Project Twitter: [@SondaNetwork](https://x.com/SondaNetwork)
+Operator Twitter: [@SolyaOS](https://x.com/SolyaOS)
+
+---
+
+## Contributing
+
+SONDA is open source under MIT. Contributions welcome via pull requests. For larger changes, open an issue first to discuss the approach.
+
+When working with the codebase, note the security model: `automation/config.yaml` contains live API keys and is gitignored. The `.githooks/pre-commit` hook blocks accidental commits of this file and detects obvious secret patterns. Enable hooks after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ---
 
