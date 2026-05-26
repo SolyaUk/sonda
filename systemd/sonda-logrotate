@@ -1,0 +1,22 @@
+# /etc/logrotate.d/sonda
+#
+# SONDA service logs rotation.
+# run_sonda.py writes one log file: /home/solya/sonda/automation/logs/run_sonda.log
+# Worker output also goes to journald via systemd, but we keep a local copy
+# for quick local tail/grep without journalctl.
+
+/home/solya/sonda/automation/logs/run_sonda.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 solya solya
+    # SONDA opens the log file once at start. After rotation we need to
+    # signal the running process to reopen — but since Python's logging
+    # FileHandler caches the FD, we use copytruncate which truncates the
+    # file in place after copying. No restart needed.
+    copytruncate
+    # We don't run any post-rotate scripts; just rotate.
+}

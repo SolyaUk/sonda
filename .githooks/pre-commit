@@ -1,0 +1,47 @@
+#!/bin/bash
+# .githooks/pre-commit
+# Block commits that would leak secrets.
+#
+# Install: git config core.hooksPath .githooks
+# (Run once after cloning; this is NOT automatic — git doesn't auto-install
+# hooks from the repo for security reasons.)
+
+set -e
+
+# Detect if automation/config.yaml is staged
+if git diff --cached --name-only | grep -qE '^automation/config\.yaml$'; then
+    echo ""
+    echo "❌ COMMIT BLOCKED: automation/config.yaml is staged"
+    echo ""
+    echo "This file contains real API keys, R2 credentials, and Telegram"
+    echo "bot tokens. It must NEVER be committed (live config stays on"
+    echo "the server only)."
+    echo ""
+    echo "If you really need to commit this (you probably don't):"
+    echo "  git reset HEAD automation/config.yaml"
+    echo "  git commit (without this file)"
+    echo ""
+    echo "To bypass this hook (DANGEROUS, only if you know what you're doing):"
+    echo "  git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+# Detect obvious API key patterns in any staged content
+STAGED_CONTENT=$(git diff --cached -U0 --diff-filter=ACM 2>/dev/null || true)
+
+# Common patterns: Helius keys (UUIDs), Cloudflare R2, Telegram bot tokens
+if echo "$STAGED_CONTENT" | grep -qE 'helius-rpc\.com/\?api-key=[a-f0-9-]{20,}'; then
+    echo "❌ COMMIT BLOCKED: Helius RPC URL with API key detected in staged changes"
+    echo "  Look for 'helius-rpc.com/?api-key=...' and replace with placeholder"
+    exit 1
+fi
+
+if echo "$STAGED_CONTENT" | grep -qE '[0-9]{8,}:AA[A-Za-z0-9_-]{30,}'; then
+    echo "❌ COMMIT BLOCKED: Telegram bot token pattern detected in staged changes"
+    echo "  Tokens look like '8695998396:AAHscgI1KzFE...' — remove or use placeholder"
+    exit 1
+fi
+
+# All checks passed
+exit 0

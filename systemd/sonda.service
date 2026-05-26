@@ -1,0 +1,78 @@
+[Unit]
+Description=SONDA — Solana Network Decentralization Analyzer
+Documentation=https://github.com/SolyaUk/sonda
+After=network-online.target
+Wants=network-online.target
+# Don't start before the testnet validator is up — we run on the same host
+# as the testnet node, and the analyzer needs the local cluster to be reachable.
+# Adjust or remove if your validator service is named differently.
+# After=solana.service
+# Wants=solana.service
+
+# Rate-limit restarts. These directives belong in [Unit], NOT [Service]
+# (a common gotcha — systemd silently ignores them if placed wrong).
+# Allow at most 5 restart attempts within a 600-second window before
+# giving up; combined with Restart=on-failure + RestartSec=30s in
+# [Service], this prevents restart storms on persistent failures.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=solya
+Group=solya
+WorkingDirectory=/home/solya/sonda/automation
+
+# Make `solana` CLI discoverable. systemd's default PATH is minimal
+# (/usr/bin:/bin:/usr/local/bin) — solana-install puts the binary under
+# ~/.local/share/solana/install/active_release/bin and adds it to PATH
+# via ~/.bashrc, which systemd does NOT read. So we set PATH explicitly.
+# subprocess.run(...) inside run_sonda.py inherits this env, which means
+# the analyzer's child processes (calling `solana gossip`) inherit it too.
+# If you ever reinstall solana to a different path, update this line.
+Environment="PATH=/home/solya/.local/share/solana/install/active_release/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/bin"
+
+# Main entrypoint: run_sonda.py with config
+ExecStart=/usr/bin/python3 /home/solya/sonda/automation/run_sonda.py \
+    --config /home/solya/sonda/automation/config.yaml
+
+# Graceful stop signal — run_sonda handles SIGTERM by waiting up to 180s
+# for workers to finish current cycle.
+KillSignal=SIGTERM
+TimeoutStopSec=200
+
+# Restart automatically on failure. Rate limit lives in [Unit] above.
+Restart=on-failure
+RestartSec=30s
+
+# Logging: stdout/stderr go to journald. Tail with:
+#   journalctl -u sonda.service -f
+# We also write to /home/solya/sonda/automation/logs/run_sonda.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sonda
+
+# Filesystem permissions and security hardening.
+# We need read/write to data and logs dirs, read-only on scripts.
+# CRITICAL: ProtectHome=read-only overlays /home/ as read-only for the process.
+# Only paths listed in ReadWritePaths can be written. The cache DB
+# (~/.solana_network_cache/geolocation_v3.db) and geo_overrides.yaml MUST
+# be writable — failure to whitelist them silently dropped SQLite writes
+# on 2026-04-26, exhausting DB-IP quota in 2 hours (see system prompt
+# section 8.5 "ProtectHome=read-only critical lesson").
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+
+# All paths that need write access:
+ReadWritePaths=/home/solya/sonda_data
+ReadWritePaths=/home/solya/.solana_network_cache
+ReadWritePaths=/home/solya/sonda/analyzer
+ReadWritePaths=/home/solya/sonda/automation/logs
+
+# Resource limits — adjust if needed.
+# This service is mostly bursty CPU during analyzer runs and idle otherwise.
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

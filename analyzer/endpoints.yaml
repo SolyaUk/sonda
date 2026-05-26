@@ -130,3 +130,12 @@ solana:
       entrypoint-3: entrypoint3.devnet.solana.com
       entrypoint-4: entrypoint4.devnet.solana.com
       entrypoint-5: entrypoint5.devnet.solana.com
+      
+  alpenglow-community:
+    entrypoint:
+      alpenglow-entrypoint-1: "64.130.37.11:8000"
+      alpenglow-entrypoint-2: "213.239.141.10:8001"
+      
+    rpc:
+      alpenglow-rpc-triton: "alpenglow.rpcpool.com:443"
+      alpenglow-rpc-validblocks: "rpc.ag.validblocks.com:443"

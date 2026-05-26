@@ -135,8 +135,18 @@ CLUSTER_URLS = {
     "mainnet-beta": "https://api.mainnet-beta.solana.com",
     "testnet": "https://api.testnet.solana.com",
     "devnet": "https://api.devnet.solana.com",
+    # Alpenglow community cluster — experimental Solana network for testing
+    # Alpenglow consensus algorithm. Default URL is Solya's own node (full
+    # control); fallbacks (Triton, Valid Blocks) are not implemented yet
+    # (see backlog #21). RPC URL can be overridden via --rpc-url or config.yaml.
+    "alpenglow-community": "http://84.32.71.43:8899",
 }
-CLUSTER_YAML_MAP = {"mainnet-beta": "mainnet", "testnet": "testnet", "devnet": "devnet"}
+CLUSTER_YAML_MAP = {
+    "mainnet-beta": "mainnet",
+    "testnet": "testnet",
+    "devnet": "devnet",
+    "alpenglow-community": "alpenglow-community",
+}
 
 EXIT_OK = 0
 EXIT_CRITICAL = 1
@@ -300,6 +310,10 @@ class NodeInfo:
     icon_url: Optional[str] = None
     website: Optional[str] = None
     details: Optional[str] = None
+    # BLS (Alpenglow consensus, SIMD-0387). Currently fetched only for
+    # alpenglow-community cluster; null on other clusters until VAT
+    # (SIMD-0357) activates there. See backlog #20.
+    bls_pubkey: Optional[str] = None
     # DoubleZero
     dz_connected: bool = False
     dz_device_account: Optional[str] = None
@@ -1118,6 +1132,10 @@ class SolanaNetworkAnalyzer:
         self.rakurai_data = {}
         self.endpoint_records: List[NodeInfo] = []
         self.current_epoch = None; self.current_slot = None; self.epoch_completed_percent = None
+        # v6.1: cluster identity and feature status (used for rollback detection
+        # in timeseries and for frontend "pending features" display).
+        self.genesis_hash = None
+        self.features = None  # {total_count, active_count, pending_count, inactive_count, pending: [...], inactive: [...]}
         self.run_timestamp = datetime.now(timezone.utc).isoformat()
         self._check_config()
 
@@ -1154,6 +1172,12 @@ class SolanaNetworkAnalyzer:
         if self.cluster == "mainnet-beta": self._create_bam_endpoints_from_api()
         self._check_endpoints_reachability()
         self._fetch_epoch()
+        self._fetch_genesis_hash()
+        self._fetch_features()
+        # BLS pubkeys: Alpenglow-only for now (SIMD-0387 active there).
+        # Other clusters will be enabled when VAT (SIMD-0357) activates — see backlog #20.
+        if self.cluster == "alpenglow-community":
+            self._fetch_bls_pubkeys()
         try: self._process_geolocation()
         except DBIPQuotaError as e:
             logger.warning(f"⚠️  DB-IP quota exhausted: {e}, secondary sources used for new IPs")
@@ -1282,6 +1306,11 @@ class SolanaNetworkAnalyzer:
 
     def _fetch_doublezero(self):
         logger.info("🔌 Fetching DoubleZero...")
+        # DZ doesn't exist on Alpenglow community cluster (different network).
+        # Skip fetch entirely; dz_malbec_available stays False, all DZ fields null.
+        if self.cluster == "alpenglow-community":
+            logger.info("  ⏭️  DZ skipped (not available on alpenglow-community)")
+            return
         dz_env = {"mainnet-beta":"mainnet-beta","testnet":"testnet","devnet":"devnet"}.get(self.cluster, "mainnet-beta")
 
         # === METROS (map metro_code → metro_name, needed for devices API) ===
@@ -1425,6 +1454,10 @@ class SolanaNetworkAnalyzer:
     def _fetch_dz_multicast(self):
         """Fetch DZ multicast groups and publisher lists via Malbec API."""
         logger.info("📡 Fetching DZ multicast...")
+        # DZ doesn't exist on Alpenglow community cluster — skip.
+        if self.cluster == "alpenglow-community":
+            logger.info("  ⏭️  DZ multicast skipped (not available on alpenglow-community)")
+            return
         dz_env = {"mainnet-beta":"mainnet-beta","testnet":"testnet","devnet":"devnet"}.get(self.cluster, "mainnet-beta")
         try:
             # === GROUPS ===
@@ -1914,6 +1947,149 @@ class SolanaNetworkAnalyzer:
             si, se = data.get("slotIndex",0), data.get("slotsInEpoch",432000)
             self.epoch_completed_percent = (si/se*100) if se else 0
             logger.info(f"✅ Epoch: {self.current_epoch}, Slot: {self.current_slot}, {self.epoch_completed_percent:.1f}%")
+
+    def _fetch_genesis_hash(self):
+        """Fetch cluster genesis hash. Critical for rollback detection in timeseries.
+        Different genesis = different chain (regenesis). Same genesis with lower
+        epoch = cluster restart from snapshot. See section 8.5 of system prompt.
+        """
+        logger.info("🔗 Fetching genesis hash...")
+        try:
+            # genesis-hash doesn't support --output json (returns plain string)
+            r = subprocess.run(
+                ["solana","--url",self.cluster_url,"genesis-hash"],
+                capture_output=True, text=True, timeout=15
+            )
+            if r.returncode == 0:
+                h = r.stdout.strip()
+                if h and len(h) >= 32:  # Solana hashes are base58, ~43-44 chars
+                    self.genesis_hash = h
+                    logger.info(f"✅ Genesis hash: {h[:8]}...{h[-4:]}")
+                else:
+                    logger.warning(f"⚠️  Genesis hash response unexpected: {r.stdout[:100]!r}")
+            else:
+                logger.warning(f"⚠️  Genesis hash fetch failed: {r.stderr.strip()[:150]}")
+        except subprocess.TimeoutExpired:
+            logger.warning("⚠️  Genesis hash timeout after 15s")
+        except Exception as e:
+            logger.warning(f"⚠️  Genesis hash error: {e}")
+
+    def _fetch_features(self):
+        """Fetch feature status from cluster. Records pending/inactive features
+        for frontend display. Skipped if RPC node fails (non-critical).
+        Output: self.features = {total_count, active_count, pending_count,
+        inactive_count, pending: [...], inactive: [...]}
+        """
+        logger.info("🎛️  Fetching features...")
+        try:
+            # solana feature status doesn't support --output json reliably; parse text.
+            # Format per line: <pubkey> | <status> | <activation_slot> | <description>
+            r = subprocess.run(
+                ["solana","--url",self.cluster_url,"feature","status"],
+                capture_output=True, text=True, timeout=30
+            )
+            if r.returncode != 0:
+                logger.warning(f"⚠️  Feature status fetch failed: {r.stderr.strip()[:150]}")
+                return
+
+            active_count = 0
+            pending = []
+            inactive = []
+            for line in r.stdout.splitlines():
+                # Skip headers, footers, blank lines
+                line = line.rstrip()
+                if not line or line.startswith("Feature ") or line.startswith("Software ") \
+                   or line.startswith("Tool ") or line.startswith("---"):
+                    continue
+                # Split on | with stripping
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) < 4:
+                    continue
+                pubkey, status, activation_slot, description = parts[0], parts[1], parts[2], "|".join(parts[3:]).strip()
+                if not pubkey or len(pubkey) < 32:
+                    continue  # not a feature line
+                if status.startswith("active "):
+                    active_count += 1
+                elif status.startswith("pending"):
+                    # "pending until epoch N" — extract N if possible
+                    activation_epoch = None
+                    m = re.search(r"pending until epoch (\d+)", status)
+                    if m:
+                        try: activation_epoch = int(m.group(1))
+                        except ValueError: pass
+                    pending.append({
+                        "id": pubkey,
+                        "description": description,
+                        "activation_epoch": activation_epoch,
+                    })
+                elif status == "inactive":
+                    inactive.append({
+                        "id": pubkey,
+                        "description": description,
+                    })
+
+            total = active_count + len(pending) + len(inactive)
+            self.features = {
+                "total_count": total,
+                "active_count": active_count,
+                "pending_count": len(pending),
+                "inactive_count": len(inactive),
+                "pending": pending,
+                "inactive": inactive,
+            }
+            logger.info(f"✅ Features: {active_count} active, {len(pending)} pending, {len(inactive)} inactive")
+            if pending:
+                for p in pending[:3]:
+                    logger.info(f"  ⏳ Pending: {p['description'][:80]}")
+            if inactive:
+                for i in inactive[:3]:
+                    logger.info(f"  ⏸️  Inactive: {i['description'][:80]}")
+        except subprocess.TimeoutExpired:
+            logger.warning("⚠️  Feature status timeout after 30s")
+        except Exception as e:
+            logger.warning(f"⚠️  Feature status error: {e}")
+
+    def _fetch_bls_pubkeys(self):
+        """Fetch BLS Public Keys for all validators (Alpenglow-only for now).
+        Called once per cycle. Uses ThreadPoolExecutor with 5 workers — safe
+        for RPC node (60 validators × 0.5s sequential = 30s; parallel = ~6s).
+        If RPC throttles or returns errors, individual fetches fail silently
+        and bls_pubkey stays None for that validator.
+        """
+        validators = [r for r in self.records if r.role == "validator" and r.vote_account]
+        if not validators:
+            logger.info("🔑 BLS pubkeys: no validators to query")
+            return
+        logger.info(f"🔑 Fetching BLS pubkeys for {len(validators)} validators (parallel)...")
+
+        def _fetch_one(rec):
+            try:
+                r = subprocess.run(
+                    ["solana","--url",self.cluster_url,"vote-account",rec.vote_account],
+                    capture_output=True, text=True, timeout=10
+                )
+                if r.returncode != 0:
+                    return None
+                # Output contains "BLS Public Key: <base58>"
+                for line in r.stdout.splitlines():
+                    if "BLS Public Key:" in line:
+                        bls = line.split("BLS Public Key:", 1)[1].strip()
+                        if bls and len(bls) >= 32:
+                            return bls
+                return None
+            except (subprocess.TimeoutExpired, Exception):
+                return None
+
+        fetched = 0
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            future_to_rec = {ex.submit(_fetch_one, rec): rec for rec in validators}
+            for fut in as_completed(future_to_rec):
+                rec = future_to_rec[fut]
+                bls = fut.result()
+                if bls:
+                    rec.bls_pubkey = bls
+                    fetched += 1
+        logger.info(f"✅ BLS pubkeys: {fetched}/{len(validators)} fetched")
 
     def _process_geolocation(self):
         logger.info(f"🌍 Geolocation for {len(self.all_ips)} IPs...")
@@ -2514,6 +2690,8 @@ class SolanaNetworkAnalyzer:
                 "is_sfdp": rec.is_sfdp,
                 "sfdp_state": rec.sfdp_state,
                 "testnet_pubkey": rec.testnet_pubkey,
+                # v6.1: BLS pubkey for Alpenglow consensus (null on other clusters)
+                "bls_pubkey": rec.bls_pubkey,
                 "website": rec.website,
                 "icon_url": rec.icon_url,
                 "bam_node": rec.bam_node,
@@ -2594,6 +2772,10 @@ class SolanaNetworkAnalyzer:
             "timestamp": self.run_timestamp, "cluster": self.cluster,
             "epoch": self.current_epoch, "slot": self.current_slot,
             "epoch_completed_percent": self.epoch_completed_percent,
+            # v6.1: cluster identity for rollback detection in timeseries
+            "genesis_hash": self.genesis_hash,
+            # v6.1: pending/inactive features for frontend display
+            "features": self.features,
             "record_counts": full_counts,
             "records": records_data,
             "metrics": self.calculate_metrics(),
@@ -2611,7 +2793,7 @@ def main():
     parser.add_argument("--dbip-key", default=os.getenv("DBIP_KEY",""))
     parser.add_argument("--ipinfo-token", default=os.getenv("IPINFO_TOKEN",""))
     parser.add_argument("--token", default=None, help="(deprecated)")
-    parser.add_argument("--cluster", choices=["mainnet-beta","testnet","devnet"], default="mainnet-beta")
+    parser.add_argument("--cluster", choices=["mainnet-beta","testnet","devnet","alpenglow-community"], default="mainnet-beta")
     parser.add_argument("--rpc-url", default=None, help="Custom RPC URL (overrides cluster default)")
     parser.add_argument("--endpoints", default="endpoints.yaml")
     parser.add_argument("--geo-overrides", default="geo_overrides.yaml", help="Geo overrides YAML (auto-generated from DZ + admin)")

@@ -1,0 +1,92 @@
+# SONDA Automation Config — EXAMPLE
+#
+# Copy this file to `automation/config.yaml` and fill in your secrets.
+# Real config.yaml MUST NOT be committed (protected by .gitignore).
+#
+# Quick start:
+#   cp automation/config.example.yaml automation/config.yaml
+#   # Edit automation/config.yaml with your real values
+#   # Run: python3 automation/run_sonda.py --config automation/config.yaml
+
+clusters:
+  mainnet-beta:
+    interval: 60
+    rpc_url: https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+    enabled: true
+  testnet:
+    interval: 300
+    rpc_url: https://api.testnet.solana.com
+    enabled: true
+  devnet:
+    interval: 300
+    rpc_url: https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+    enabled: true
+  # Alpenglow community cluster — experimental Solana network testing
+  # Alpenglow consensus algorithm. RPC should be a node you control
+  # (developer/community nodes can be flaky after regenesis events).
+  alpenglow-community:
+    interval: 60
+    rpc_url: http://YOUR_ALPENGLOW_NODE_IP:8899
+    enabled: true
+
+api_keys:
+  # DB-IP Starter plan key (https://db-ip.com) — primary geolocation source
+  # Free tier: 1k req/day; Starter (paid €32.90/mo): 10k/day with Extended API
+  dbip_key: "YOUR_DBIP_KEY"
+  # IPInfo token (https://ipinfo.io) — secondary geolocation source
+  # Free tier: ~50k req/month
+  ipinfo_token: "YOUR_IPINFO_TOKEN"
+
+r2:
+  # Cloudflare R2 — public storage for SONDA data
+  # Bucket: sonda-data, exposed via data.sonda.network
+  account_id: "YOUR_CLOUDFLARE_ACCOUNT_ID"
+  access_key_id: "YOUR_R2_ACCESS_KEY_ID"
+  secret_access_key: "YOUR_R2_SECRET_KEY"
+  bucket: "sonda-data"
+  public_url: "https://data.sonda.network"
+
+telegram:
+  # Debug bot (private channel) — receives ALL events including errors
+  debug_bot_token: "YOUR_DEBUG_BOT_TOKEN"
+  debug_chat_id: "YOUR_DEBUG_CHAT_ID"
+  # Public bot (public channel) — receives only mainnet/testnet/devnet events
+  public_bot_token: "YOUR_PUBLIC_BOT_TOKEN"
+  public_chat_id: "YOUR_PUBLIC_CHAT_ID"
+  # Which clusters' events reach the public channel. Debug bot sees all.
+  # Default is ["mainnet-beta"], but we explicitly list here for clarity.
+  # IMPORTANT: do NOT add "alpenglow-community" — experimental cluster events
+  # belong only in the debug channel, not in public-facing telegram.
+  public_clusters: ["mainnet-beta", "testnet", "devnet"]
+  # Alert on individual validator delinquent/recovered transitions?
+  # Defaults to false because it can be spammy on a 782-validator network.
+  alert_validator_delinquent: false
+  # (future) verbose_first_week was a placeholder, kept for forward compat
+  verbose_first_week: true
+
+paths:
+  # Path to analyzer scripts (solana_analyzer.py, endpoints.yaml, etc.)
+  sonda_scripts: /home/solya/sonda/analyzer
+  # Path to automation scripts (run_sonda.py, this config, etc.)
+  automation_dir: /home/solya/sonda/automation
+  # Path to runtime data — NOT in git, separate directory
+  snapshots_dir: /home/solya/sonda_data/snapshots
+  data_dir: /home/solya/sonda_data
+  backups_dir: /home/solya/sonda_data/backups
+  logs_dir: /home/solya/sonda/automation/logs
+
+# Endpoint alerting strategy. Two modes:
+#   state_based — endpoints have rolling health states (healthy/degraded/down).
+#                 Alerts fire only on state TRANSITIONS, so a flappy endpoint
+#                 with high overall uptime stays "healthy" through brief blips.
+#                 Best for production — quiet but accurate.
+#   realtime    — every reachable→unreachable transition alerts immediately.
+#                 Use this when per-cycle visibility matters more than noise.
+#
+# To switch strategies, change `mode` and restart run_sonda.py. No data loss.
+endpoint_alerts:
+  mode: state_based
+  health_window_minutes: 30   # rolling window for uptime calculation
+  threshold_healthy: 95       # uptime% >= this -> healthy
+  threshold_down: 50          # uptime% < this -> down (between -> degraded)
+  min_data_points: 5          # need this many samples in window to evaluate
