@@ -1,7 +1,21 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.9
+Solana Network Decentralization Analyzer v3.10.1
 ==============================================
+Changes from v3.10 (2026-09-04, hotfix):
+- BLS fetch load control: 2 workers, per-cycle cap, wall-clock budget,
+  early stop on rate limiting. Missing keys are fetched over several cycles.
+- consensus derived from the CLI catalog when getProgramAccounts fails.
+- SIMD-0326 matching prefers the consensus gate over the handover gate.
+
+Changes from v3.9 (pipeline v6.10, 2026-09-04):
+- BLS pubkeys fetched on every cluster, cached per vote account (7 days,
+  jittered; negative results 1 day; genesis hash in the key).
+- New top-level `consensus` object (positive evidence: SIMD-0326 ACTIVE).
+- On-chain validator-info is the primary name/icon/website source on all
+  clusters (15 min cache keyed by genesis); Trillium only fills gaps.
+- Genesis hash is fetched right after validators (before validator-info).
+
 Changes from v3.8 (pipeline v6.9, 2026-08-27):
 - RPC fallback chain: --rpc-url may be repeated (primary first). Critical
   calls (gossip, validators, epoch-info) fail over to the next URL when the
@@ -91,6 +105,7 @@ import signal
 import logging
 import base64
 import struct
+import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Any, Set
 from dataclasses import dataclass, asdict, field
@@ -1063,8 +1078,33 @@ API_TTL = {
     "bam_nodes": 120,          # 2 min
     "bam_ibrl": 3600,          # 1 hour
     "bam_stake": 3600,         # 1 hour
-    "validator_info": 14400,   # 4 hours
+    "validator_info": 900,     # 15 min (v3.10): one getProgramAccounts on the Config program per refresh
     "rakurai": 3600,           # 1 hour — validator list changes slowly
+}
+
+# v3.10: BLS pubkey cache (api_cache source "bls"). Keys are stable per vote
+# account, so a long TTL is safe; the per-key jitter spreads refetches.
+BLS_CACHE_TTL_DAYS = 7
+BLS_NEGATIVE_TTL_DAYS = 1      # validators without a key yet are re-checked daily
+# v3.10.1: load control for the per-validator `solana vote-account` calls.
+# Public RPCs and the Helius free tier rate-limit at ~10 requests/s; a
+# rate-limited CLI call burns its whole 10s timeout, so parallelism is kept
+# low and the warm-up is spread over several cycles instead of one.
+BLS_FETCH_WORKERS = 2
+BLS_MAX_FETCH_PER_CYCLE = 100
+BLS_FETCH_BUDGET_S = 90
+
+# v3.10: per-cluster fallback ids of the SIMD-0326 (Alpenglow consensus)
+# feature gate, used only when the CLI catalog has no description for it.
+# Feature ids differ between the public clusters and the community fork.
+# Fill from: solana --url <rpc> feature status --display-all | grep -i 0326
+# A1peng... is the SIMD-0326 consensus gate id in the CLI 4.2.1 catalog
+# (seen on the alpenglow-community cluster on 2026-09-04).
+CONSENSUS_FEATURE_IDS = {
+    "mainnet-beta": ("A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS",),
+    "testnet": ("A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS",),
+    "devnet": ("A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS",),
+    "alpenglow-community": ("A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS",),
 }
 
 
@@ -1473,6 +1513,8 @@ class SolanaNetworkAnalyzer:
         # in timeseries and for frontend "pending features" display).
         self.genesis_hash = None
         self.features = None  # {total_count, active_count, pending_count, pending: [...]}
+        self.consensus = None  # v3.10: {mode, simd_0326, feature_id, activation_slot, activation_epoch}
+        self.slot_index = None  # v3.10: populated by _fetch_epoch, used for activation_epoch
         self.run_timestamp = datetime.now(timezone.utc).isoformat()
         self._check_config()
 
@@ -1498,10 +1540,13 @@ class SolanaNetworkAnalyzer:
         logger.info("="*60); logger.info(f"🚀 Solana {self.cluster.upper()} Network Analysis"); logger.info("="*60)
         if not self._fetch_gossip(): return False
         if not self._fetch_validators(): return False
-        if self.cluster == "mainnet-beta":
-            self._fetch_trillium()
-            if not self.trillium_data: self._fetch_validator_info()
-        else: self._fetch_validator_info()
+        # v3.10: genesis hash first (it keys the validator-info cache per
+        # chain), then on-chain validator-info on EVERY cluster as the primary
+        # source of name/website/details/icon. Trillium (mainnet) runs after
+        # it and only fills gaps.
+        self._fetch_genesis_hash()
+        self._fetch_validator_info()
+        if self.cluster == "mainnet-beta": self._fetch_trillium()
         if self.cluster == "mainnet-beta": self._fetch_doublezero()
         if self.cluster == "mainnet-beta": self._fetch_dz_multicast()
         if self.cluster == "mainnet-beta": self._fetch_bam()
@@ -1512,12 +1557,10 @@ class SolanaNetworkAnalyzer:
         if self.cluster == "mainnet-beta": self._create_bam_endpoints_from_api()
         self._check_endpoints_reachability()
         self._fetch_epoch()
-        self._fetch_genesis_hash()
         self._fetch_features()
-        # BLS pubkeys: Alpenglow-only for now (SIMD-0387 active there).
-        # Other clusters will be enabled when VAT (SIMD-0357) activates — see backlog #20.
-        if self.cluster == "alpenglow-community":
-            self._fetch_bls_pubkeys()
+        # v3.10: BLS pubkeys on every cluster (VAT is active on mainnet and
+        # testnet as well). Cached per vote account, see _fetch_bls_pubkeys.
+        self._fetch_bls_pubkeys()
         try: self._process_geolocation()
         except DBIPQuotaError as e:
             logger.warning(f"⚠️  DB-IP quota exhausted: {e}, secondary sources used for new IPs")
@@ -1622,7 +1665,10 @@ class SolanaNetworkAnalyzer:
 
     def _fetch_validator_info(self):
         logger.info("📝 Fetching validator-info...")
-        data = self.api_cache.get("validator_info", self.cluster, API_TTL["validator_info"])
+        # v3.10: the cache key carries the genesis hash so a regenesis (new
+        # validator-info accounts on a new chain) refreshes immediately.
+        vi_key = f"{self.cluster}:{(self.genesis_hash or 'nogenesis')[:8]}"
+        data = self.api_cache.get("validator_info", vi_key, API_TTL["validator_info"])
         if data is None:
             # v6.3: use --url explicitly. Older code used cluster monikers
             # (`-um`, `-ut`, `-ud`), but those only covered 3 clusters; for
@@ -1632,7 +1678,7 @@ class SolanaNetworkAnalyzer:
             # commands in this file address the cluster.
             data = run_solana_cmd(["solana","--url",self.cluster_url,"validator-info","get","--output","json"], timeout=20, desc="validator-info")
             if not data: logger.warning("⚠️  validator-info unavailable"); return
-            self.api_cache.set("validator_info", self.cluster, data)
+            self.api_cache.set("validator_info", vi_key, data)
         else:
             logger.info("  📦 validator-info from cache")
         c = 0
@@ -1667,7 +1713,7 @@ class SolanaNetworkAnalyzer:
             for v in raw:
                 pk = v.get("identity_pubkey")
                 if pk: self.trillium_data[pk] = v
-            upd = 0
+            upd = 0; gap_name = 0; gap_icon = 0
             for rec in self.records:
                 td = self.trillium_data.get(rec.identity_pubkey)
                 if td:
@@ -1675,9 +1721,12 @@ class SolanaNetworkAnalyzer:
                     # as a placeholder when a validator has no real name. Reject
                     # those — keep name null so frontend handles it, rather than
                     # showing a useless truncated key. (v6.x bugfix)
+                    # v3.10: on-chain validator-info (applied before this) is the
+                    # primary source. Trillium only fills gaps, i.e. validators
+                    # that never published validator-info, and we count those.
                     td_name = td.get("name")
-                    if td_name and not is_truncated_pubkey(td_name, rec.vote_account, rec.identity_pubkey):
-                        rec.name = td_name
+                    if not rec.name and td_name and not is_truncated_pubkey(td_name, rec.vote_account, rec.identity_pubkey):
+                        rec.name = td_name; gap_name += 1
                     # client_type comes from RPC clientId (Helius gives canonical
                     # names like "HarmonicAgave"; official RPC gives "Unknown(N)"
                     # which our normalizer maps to the same canonical). Only fall
@@ -1689,7 +1738,9 @@ class SolanaNetworkAnalyzer:
                     rec.mev_commission = td.get("mev_commission")
                     rec.is_sfdp = td.get("is_sfdp")
                     rec.sfdp_state = td.get("sfdp_state")
-                    rec.icon_url = td.get("icon_url"); rec.website = td.get("website")
+                    if not rec.icon_url and td.get("icon_url"):
+                        rec.icon_url = td.get("icon_url"); gap_icon += 1
+                    if not rec.website and td.get("website"): rec.website = td.get("website")
                     rec.testnet_pubkey = td.get("testnet_pubkey")
                     try:
                         if td.get("median_vote_latency") is not None: rec.median_vote_latency = float(td["median_vote_latency"])
@@ -1698,7 +1749,7 @@ class SolanaNetworkAnalyzer:
                         if td.get("slot_duration_median") is not None: rec.slot_duration_median = float(td["slot_duration_median"])
                     except (ValueError,TypeError): pass
                     upd += 1
-            logger.info(f"✅ Trillium: {upd} updated")
+            logger.info(f"✅ Trillium: {upd} updated (gap-filled name: {gap_name}, icon: {gap_icon})")
         except Exception as e: logger.warning(f"⚠️  Trillium: {e}")
 
     def _fetch_doublezero(self):
@@ -2342,6 +2393,7 @@ class SolanaNetworkAnalyzer:
         if data:
             self.current_epoch = data.get("epoch"); self.current_slot = data.get("absoluteSlot")
             si, se = data.get("slotIndex",0), data.get("slotsInEpoch",432000)
+            self.slot_index = si  # v3.10 — for activation_epoch in _derive_consensus
             self.slots_in_epoch = se  # v6.3 — for activation_slot → epoch conversion in _fetch_features
             self.epoch_completed_percent = (si/se*100) if se else 0
             logger.info(f"✅ Epoch: {self.current_epoch}, Slot: {self.current_slot}, {self.epoch_completed_percent:.1f}%")
@@ -2424,26 +2476,33 @@ class SolanaNetworkAnalyzer:
             data = r.json()
             if "error" in data:
                 logger.warning(f"⚠️  Feature RPC error: {data['error']}")
-                return
-            accounts = data.get("result") or []
-            if not isinstance(accounts, list):
-                logger.warning(f"⚠️  Feature RPC returned unexpected shape: {type(accounts)}")
-                return
+                accounts = None
+            else:
+                accounts = data.get("result") or []
+                if not isinstance(accounts, list):
+                    logger.warning(f"⚠️  Feature RPC returned unexpected shape: {type(accounts)}")
+                    accounts = None
         except requests.exceptions.RequestException as e:
             logger.warning(f"⚠️  Feature RPC network error: {e}")
-            return
+            accounts = None
         except (ValueError, KeyError) as e:
             logger.warning(f"⚠️  Feature RPC parse error: {e}")
-            return
+            accounts = None
 
-        logger.info(f"  📡 Got {len(accounts)} feature accounts from cluster")
+        # v3.10.1: when getProgramAccounts failed (429, no account index on a
+        # fallback node) features stay null for this cycle, but we still run
+        # the CLI below and read the consensus mode from its status column.
+        if accounts is None:
+            logger.warning("  ⚠️  feature accounts unavailable this cycle; consensus will come from CLI catalog status")
+        else:
+            logger.info(f"  📡 Got {len(accounts)} feature accounts from cluster")
 
         # Step 2 — parse activation state from each account's bincode data.
         # Feature account data layout (bincode Option<u64>):
         #   - 0x00 → None (pending, not yet activated)
         #   - 0x01 + 8 bytes LE u64 → Some(activation_slot), so feature is active
         features_raw = []
-        for entry in accounts:
+        for entry in (accounts or []):
             pubkey = entry.get("pubkey")
             account = entry.get("account") or {}
             data_field = account.get("data")
@@ -2485,6 +2544,7 @@ class SolanaNetworkAnalyzer:
         # --display-all is critical: without it, CLI hides "old" active features
         # and we'd only get descriptions for recently activated ones.
         descriptions = {}
+        cli_status = {}  # v3.10.1: pk -> (status text, activation slot text)
         try:
             cli_r = subprocess.run(
                 ["solana","--url",self.cluster_url,"feature","status","--display-all"],
@@ -2506,6 +2566,7 @@ class SolanaNetworkAnalyzer:
                     desc = "|".join(parts[3:]).strip()
                     if desc:
                         descriptions[pk] = desc
+                    cli_status[pk] = (parts[1], parts[2])
                 logger.info(f"  📝 Got {len(descriptions)} feature descriptions from CLI")
             else:
                 logger.warning(f"⚠️  CLI feature status returned {cli_r.returncode} — descriptions unavailable")
@@ -2513,6 +2574,21 @@ class SolanaNetworkAnalyzer:
             logger.warning("⚠️  CLI feature status timeout — descriptions unavailable")
         except Exception as e:
             logger.warning(f"⚠️  CLI feature status error: {e} — descriptions unavailable")
+
+        if accounts is None:
+            cli_raw = []
+            for pk, (st, sl) in cli_status.items():
+                m = re.search(r"active since epoch (\d+)", st)
+                cli_raw.append({
+                    "id": pk,
+                    "status": "active" if st.lower().startswith("active") else "inactive",
+                    "activation_slot": int(sl) if sl.isdigit() else None,
+                    "activation_epoch": int(m.group(1)) if m else None,
+                })
+            self.features = None
+            self.consensus = self._derive_consensus(cli_raw, descriptions, source="cli")
+            logger.info(f"🏔  Consensus (from CLI): {self.consensus['mode']} (SIMD-0326 {self.consensus['simd_0326']}, id {self.consensus['feature_id']})")
+            return
 
         # Step 4 — categorize and enrich
         active_count = 0
@@ -2553,25 +2629,101 @@ class SolanaNetworkAnalyzer:
             "pending": pending,
         }
         logger.info(f"✅ Features: {active_count} active, {len(pending)} pending (total {total})")
+        self.consensus = self._derive_consensus(features_raw, descriptions)
+        logger.info(f"🏔  Consensus: {self.consensus['mode']} (SIMD-0326 {self.consensus['simd_0326']}, id {self.consensus['feature_id']})")
         if pending:
             for p in pending[:5]:
                 desc = p.get("description") or "(no description in CLI catalog)"
                 logger.info(f"  ⏳ Pending: {p['id'][:12]}... {desc[:70]}")
 
+    def _derive_consensus(self, features_raw, descriptions, source="rpc"):
+        """Explicit consensus state of the cluster (v3.10).
+
+        Positive evidence only: the cluster runs Alpenglow when the SIMD-0326
+        feature account is ACTIVE on this chain. Pending or absent both mean
+        Tower BFT (absent is the normal state right after a regenesis, before
+        the gate is created). The feature is found by its CLI catalog
+        description (stable across clusters) with a per-cluster id fallback,
+        and the matched id is recorded so nobody downstream has to guess.
+        activation_epoch assumes a constant epoch length between activation
+        and now (exact on the community cluster, fine for recent slots on the
+        public clusters); activation_slot is the exact on-chain value.
+        """
+        def norm(s):
+            return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+        # v3.10.1: the catalog has two SIMD-0326 gates (consensus itself and
+        # "fast leader handover"); prefer the consensus one, never the handover.
+        cands = [f for f in features_raw if "simd0326" in norm(descriptions.get(f["id"]))]
+        hit = next((f for f in cands if "consensus" in norm(descriptions.get(f["id"]))), None)
+        if hit is None:
+            hit = next((f for f in cands if "handover" not in norm(descriptions.get(f["id"]))), None)
+        if hit is None:
+            fallback = CONSENSUS_FEATURE_IDS.get(self.cluster, ())
+            for f in features_raw:
+                if f["id"] in fallback:
+                    hit = f; break
+        if hit is None:
+            return {"mode": "tower", "simd_0326": "absent", "feature_id": None,
+                    "activation_slot": None, "activation_epoch": None, "source": source}
+        act_slot = hit.get("activation_slot")
+        act_epoch = hit.get("activation_epoch")  # set on the CLI path only
+        if (act_epoch is None and act_slot is not None and self.slots_in_epoch and self.current_slot is not None
+                and self.current_epoch is not None and self.slot_index is not None):
+            epoch_start = self.current_slot - self.slot_index
+            if act_slot >= epoch_start:
+                act_epoch = self.current_epoch
+            else:
+                act_epoch = self.current_epoch - ((epoch_start - act_slot + self.slots_in_epoch - 1) // self.slots_in_epoch)
+        return {
+            "mode": "alpenglow" if hit["status"] == "active" else "tower",
+            "simd_0326": hit["status"],
+            "feature_id": hit["id"],
+            "activation_slot": act_slot,
+            "activation_epoch": act_epoch,
+            "source": source,
+        }
+
     def _fetch_bls_pubkeys(self):
-        """Fetch BLS Public Keys for all validators (Alpenglow-only for now).
-        Called once per cycle. Uses ThreadPoolExecutor with 5 workers — safe
-        for RPC node (60 validators × 0.5s sequential = 30s; parallel = ~6s).
-        If RPC throttles or returns errors, individual fetches fail silently
-        and bls_pubkey stays None for that validator.
+        """Fetch BLS Public Keys for all validators on every cluster (v3.10).
+
+        A BLS key is a stable per-vote-account attribute (SIMD-0387), so it
+        is cached in api_cache per (cluster, genesis, vote account) for
+        BLS_CACHE_TTL_DAYS with a deterministic per-key jitter, and refetched
+        only when missing or expired. Validators without a key are
+        negative-cached for BLS_NEGATIVE_TTL_DAYS so newly migrated ones are
+        picked up within a day. A failed refetch keeps the previously known
+        key (stale beats missing). The genesis hash in the key makes a
+        regenesis refetch everything. First mainnet run fetches ~800 keys once
+        (5 workers, about 1-2 min); steady state is ~100 fetches per day.
         """
         validators = [r for r in self.records if r.role == "validator" and r.vote_account]
         if not validators:
             logger.info("🔑 BLS pubkeys: no validators to query")
             return
-        logger.info(f"🔑 Fetching BLS pubkeys for {len(validators)} validators (parallel)...")
+        chain = (self.genesis_hash or "nogenesis")[:8]
+        to_fetch = []   # (key, rec, stale_value)
+        cached = 0
+        for rec in validators:
+            key = f"{self.cluster}:{chain}:{rec.vote_account}"
+            jitter = int(hashlib.sha1(key.encode()).hexdigest(), 16) % 86400
+            entry = self.api_cache.get("bls", key, BLS_CACHE_TTL_DAYS * 86400 + jitter)
+            if entry is not None and entry.get("bls"):
+                rec.bls_pubkey = entry["bls"]; cached += 1
+                continue
+            if entry is not None:
+                # Negative entry inside the long TTL: honour the short TTL only
+                if self.api_cache.get("bls", key, BLS_NEGATIVE_TTL_DAYS * 86400 + jitter) is not None:
+                    continue
+            stale = self.api_cache.get("bls", key, 10**9)  # any age, for fallback
+            to_fetch.append((key, rec, (stale or {}).get("bls")))
+        if not to_fetch:
+            logger.info(f"🔑 BLS pubkeys: {cached}/{len(validators)} from cache, nothing to fetch")
+            return
+        logger.info(f"🔑 BLS pubkeys: {cached} from cache, fetching {len(to_fetch)} (parallel)...")
 
         def _fetch_one(rec):
+            # Returns the key, '' when the CLI answered without a BLS line
+            # (confirmed absent), or None on any error (rate limit, timeout).
             try:
                 r = subprocess.run(
                     ["solana","--url",self.cluster_url,"vote-account",rec.vote_account],
@@ -2585,20 +2737,56 @@ class SolanaNetworkAnalyzer:
                         bls = line.split("BLS Public Key:", 1)[1].strip()
                         if bls and len(bls) >= 32:
                             return bls
-                return None
+                return ""
             except (subprocess.TimeoutExpired, Exception):
                 return None
 
-        fetched = 0
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            future_to_rec = {ex.submit(_fetch_one, rec): rec for rec in validators}
-            for fut in as_completed(future_to_rec):
-                rec = future_to_rec[fut]
-                bls = fut.result()
-                if bls:
-                    rec.bls_pubkey = bls
-                    fetched += 1
-        logger.info(f"✅ BLS pubkeys: {fetched}/{len(validators)} fetched")
+        # v3.10.1: never-fetched keys first, then expired ones; cap per cycle.
+        to_fetch.sort(key=lambda t: 0 if not t[2] else 1)
+        deferred = max(0, len(to_fetch) - BLS_MAX_FETCH_PER_CYCLE)
+        all_to_fetch = to_fetch
+        to_fetch = to_fetch[:BLS_MAX_FETCH_PER_CYCLE]
+        # Expired keys that are not reached this cycle keep their stale value
+        fetched = 0; kept_stale = 0; absent = 0; errors = 0; stopped = False
+        t0 = time.monotonic()
+        chunk_size = BLS_FETCH_WORKERS * 5
+        with ThreadPoolExecutor(max_workers=BLS_FETCH_WORKERS) as ex:
+            for start in range(0, len(to_fetch), chunk_size):
+                if time.monotonic() - t0 > BLS_FETCH_BUDGET_S:
+                    stopped = True; break
+                chunk = to_fetch[start:start + chunk_size]
+                chunk_errors = 0
+                future_to = {ex.submit(_fetch_one, rec): (key, rec, stale) for key, rec, stale in chunk}
+                for fut in as_completed(future_to):
+                    key, rec, stale = future_to[fut]
+                    bls = fut.result()
+                    if bls:
+                        rec.bls_pubkey = bls; fetched += 1
+                        self.api_cache.set("bls", key, {"bls": bls})
+                    elif bls == "":
+                        # CLI answered, no BLS line: confirmed absent, negative-cache it
+                        absent += 1
+                        self.api_cache.set("bls", key, {"bls": None})
+                    elif stale:
+                        # Error (rate limit, timeout): keep the known key, refresh its age
+                        rec.bls_pubkey = stale; kept_stale += 1; chunk_errors += 1
+                        self.api_cache.set("bls", key, {"bls": stale})
+                    else:
+                        # Error and nothing known: no cache entry, retried next cycle
+                        errors += 1; chunk_errors += 1
+                if chunk_errors * 2 > len(chunk):
+                    # More than half of the chunk failed: the RPC is rate limiting
+                    # us; stop for this cycle instead of burning timeouts.
+                    stopped = True; break
+        # Keys deferred by the cap or the stop still get their stale value
+        for key, rec, stale in all_to_fetch:
+            if not rec.bls_pubkey and stale:
+                rec.bls_pubkey = stale
+        have = sum(1 for r in validators if r.bls_pubkey)
+        note = " (stopped early: rate limiting or budget)" if stopped else ""
+        logger.info(f"✅ BLS pubkeys: {fetched} fetched, {cached} cached, {kept_stale} kept stale, "
+                    f"{absent} absent, {errors} errors, {deferred} deferred{note}; "
+                    f"{have}/{len(validators)} validators have a key")
 
     def _process_geolocation(self):
         logger.info(f"🌍 Geolocation for {len(self.all_ips)} IPs...")
@@ -3281,6 +3469,8 @@ class SolanaNetworkAnalyzer:
             "genesis_hash": self.genesis_hash,
             # v6.1: pending/inactive features for frontend display
             "features": self.features,
+            # v3.10: explicit consensus state (all clusters), see _derive_consensus
+            "consensus": self.consensus,
             "record_counts": full_counts,
             "records": records_data,
             "metrics": self.calculate_metrics(),
