@@ -1,0 +1,725 @@
+# =============================================================================
+# Datacenter and ASN Overrides
+# =============================================================================
+#
+# Two-level lookup in derive_views.py:
+#   1. "{asn}_{city}" — overrides for specific DC location (most specific wins)
+#   2. "{asn}"        — overrides for entire ASN
+#   3. Fallback to raw asn_name from geolocation
+#
+# Fields (all optional, can be empty or omitted):
+#   display_name   — human-readable label
+#   website        — provider's homepage
+#   incidents      — provider's incidents site or api
+#   icon_url       — logo URL for light theme (if only one icon_* field, used for both themes)
+#   icon_url_dark  — logo URL for dark theme (frontend picks based on active theme)
+#   country        — ISO country code (only to override geo data)
+#   city           — explicit city (rarely needed)
+#   notes          — internal notes, NOT shown on UI
+#   tags           — list of confirmed traits (see conventions below)
+#   affiliate:     — for future monetization, currently inert
+#     code:        — referral code
+#     url:         — full referral URL
+#     notes:       — internal notes about partnership
+#
+# Tag conventions (use sparingly, only with confirmed evidence):
+#   solana-focused   — provider has explicit Solana packages or community partnerships
+#                      Confirmed: Edgevana, Cherry Servers, Mevspace
+#   bare-metal       — physical hardware (the norm for Solana validators)
+#   cloud-only       — VPS/cloud only; warning, atypical for Solana
+#   banned           — provider doesn't allow Solana validators
+#                      Confirmed: Hetzner (since 2022)
+#   resold           — reselling another provider's infrastructure
+#   deprecated       — no longer recommended
+#   validator-funding — provider invests in Solana ecosystem
+#   DZ-partner       — integrated with DoubleZero
+#
+# Initial fill is best-effort based on public information. Marked with "# ?"
+# where uncertain — please verify and edit.
+# =============================================================================
+
+
+# ============================================================================
+# ASN-LEVEL OVERRIDES (apply across all cities of this ASN)
+# Sorted roughly by total stake across all clusters (most impactful first)
+# ============================================================================
+
+# TeraSwitch — major Solana-friendly provider, bare-metal in multiple regions
+# Validators: 160 | Stake: 137% (sum across 4 clusters)
+"AS20326":
+  display_name: "Teraswitch"
+  website: "https://teraswitch.com/bare-metal"
+  incidents: "https://www.teraswitchstatus.com"
+  tags: ["DZ-partner"]
+  notes: "Teraswitch Joins DoubleZero Network as Infrastructure Contributor: https://x.com/Austin_Federa/status/2033604413936570556"
+
+# Latitude.sh — bare-metal cloud, popular with Solana operators
+# Validators: 167 | Stake: 50%
+# has referral program (for example cvk https://www.latitude.sh/r/DB11B9AB)
+"AS396356":
+  display_name: "Latitude.sh"
+  website: "https://www.latitude.sh/features"
+  incidents: "https://status.latitude.sh"
+  tags: ["solana-focused", "DZ-partner"]
+  notes: "The best servers for Solana RPC and Validator nodes: https://www.latitude.sh/blog/the-best-servers-for-solana-rpc-and-validator-nodes | Please welcome LatitudeSH to the DoubleZero project as a network contributor: https://x.com/doublezero/status/1957464485532258447"
+
+# OVH — large French cloud/dedicated provider
+# Note: some OVH IPs banned by Solana validator-discovery in the past;
+# legitimate validators use OVH bare-metal where allowed
+# Validators: 78 | Stake: 14%
+"AS16276":
+  display_name: "OVHcloud"
+  website: "https://www.ovhcloud.com"
+  incidents: "https://bare-metal-servers.status-ovhcloud.com"
+
+# Cherry Servers (Chicago AS) — confirmed solana-focused, has explicit Solana packages
+# Validators: 38 | Stake: 8%
+# has referral program (for example cvk https://portal.cherryservers.com/teams/154178/settings/affiliate)
+"AS204770":
+  display_name: "Cherry Servers"
+  website: "https://portal.cherryservers.com"
+  tags: ["solana-focused"]
+#  notes: "AS204770 = Chicago region"
+  incidents: "https://status.cherryservers.com"
+
+# Cherry Servers (Lithuania AS) — same brand, different ASN per region
+# Validators: 26 | Stake: 5%
+"AS16125":
+  display_name: "Cherry Servers"
+  website: "https://portal.cherryservers.com"
+  tags: ["solana-focused", "DZ-partner"]
+#  notes: "AS16125 = Lithuania (Šiauliai) region"
+  notes: "Cherry Servers X DoubleZero: https://www.cherryservers.com/cherry-servers-x-doublezero | Another 300Gbps of dedicated bandwidth is now live on DoubleZero: https://x.com/doublezero/status/1986429988900335629"
+  incidents: "https://status.cherryservers.com"
+
+# Cherry Servers (Netherlands AS) — same brand
+# Validators: 25 | Stake: 4%
+"AS59642":
+  display_name: "Cherry Servers"
+  website: "https://portal.cherryservers.com"
+  tags: ["solana-focused", "DZ-partner"]
+#  notes: "AS59642 = Netherlands (Amsterdam) region"
+  notes: "Cherry Servers X DoubleZero: https://www.cherryservers.com/cherry-servers-x-doublezero | Another 300Gbps of dedicated bandwidth is now live on DoubleZero: https://x.com/doublezero/status/1986429988900335629"
+  incidents: "https://status.cherryservers.com"
+
+# Cherry Servers (Sweden AS) — same brand
+# Validators: 23 | Stake: 4%
+"AS214159":
+  display_name: "Cherry Servers"
+  website: "https://portal.cherryservers.com"
+  tags: ["solana-focused", "DZ-partner"]
+#  notes: "AS214159 = Sweden (Stockholm) region"
+  notes: "Cherry Servers X DoubleZero: https://www.cherryservers.com/cherry-servers-x-doublezero | Another 300Gbps of dedicated bandwidth is now live on DoubleZero: https://x.com/doublezero/status/1986429988900335629"
+  incidents: "https://status.cherryservers.com"
+
+# Cherry Servers (Frankfurt AS) — same brand
+# Validators: 14 | Stake: 2%
+"AS213896":
+  display_name: "Cherry Servers"
+  website: "https://portal.cherryservers.com"
+  tags: ["solana-focused", "DZ-partner"]
+#  notes: "AS213896 = Germany (Frankfurt) region"
+  notes: "Cherry Servers X DoubleZero: https://www.cherryservers.com/cherry-servers-x-doublezero | Another 300Gbps of dedicated bandwidth is now live on DoubleZero: https://x.com/doublezero/status/1986429988900335629"
+  incidents: "https://status.cherryservers.com"
+  
+# Cherry Servers (Singapore AS) — same brand
+"AS216444":
+  display_name: "Cherry Servers"
+  website: "https://portal.cherryservers.com"
+  tags: ["solana-focused"]
+#  notes: "AS216444 = Singapore region"
+  incidents: "https://status.cherryservers.com"
+  
+# Cherry Servers (Japan) — same brand
+"AS210162":
+  display_name: "Cherry Servers"
+  website: "https://portal.cherryservers.com"
+  tags: ["solana-focused"]
+#  notes: "AS216444 = Singapore region"
+  incidents: "https://status.cherryservers.com"
+
+# Mevspace — Polish provider with explicit Solana packages, confirmed solana-focused
+# Validators: 75 | Stake: 16%
+# has reselling program https://mevspace.com/contact?subject=reseller
+"AS201814":
+  display_name: "Mevspace"
+  website: "https://mevspace.com/dedicated-servers/amd"
+  tags: ["solana-focused"]
+  notes: "You need to buy 'Solana Protect' pack to avoid firewall blocks"
+
+# Interserver Inc — US bare-metal
+# Validators: 38 | Stake: 13%
+# has referral program https://www.interserver.net/affiliate.html (for example cvk https://www.interserver.net/r/972061)
+"AS19318":
+  display_name: "InterServer"
+  website: "https://www.interserver.net/dedicated"
+  incidents: "https://interserver.statuspage.io"
+
+# Allnodes — staking-as-a-service infrastructure provider
+# Validators: 96 | Stake: 11%
+"AS395201":
+  display_name: "Allnodes"
+  website: "https://www.allnodes.com/hosting/solana"
+  tags: ["solana-focused", "DZ-partner"]
+  notes: "Power Your Solana Validator with Allnodes Clients: https://www.allnodes.com/hosting/solana-clients | We’re excited to welcome Allnodes as the newest network contributor to DoubleZero: https://x.com/doublezero/status/2016222306453086604"
+
+# WebNX — US-based dedicated hosting
+# Validators: 73 | Stake: 17%
+# has referral program https://clients.webnx.com/affiliates.php
+"AS18450":
+  display_name: "WebNX"
+  website: "https://clients.webnx.com"
+  incidents: "https://clients.webnx.com/serverstatus.php"
+
+# Monogon SE — small German provider, AS202732
+# Validators: 3 | Stake: 16%
+# Note: Some Monogon validators reportedly operate from Equinix facilities
+# (per Tim Garcia / Solana Foundation), but ASN remains registered to Monogon
+"AS202732":
+  display_name: "Monogon"
+  website: "https://monogon.tech"
+  icon_url: "https://monogon.tech/monogon.svg"
+  notes: "Operators may use Equinix peering/colocation in some locations"
+
+# Vultr — public cloud provider; Edgevana resells Vultr in many regions
+# Without per-city overrides this is Vultr; Edgevana cities handled below
+# Validators: 110 | Stake: 6%
+"AS20473":
+  display_name: "Edgevana"
+  website: "https://nodes.edgevana.com/launch"
+  tags: ["solana-focused"]
+  notes: "Edgevana fully use this Vultr ASN"
+
+# Hivelocity — bare-metal cloud, multiple US/global locations
+# Validators: 40 | Stake: 9%
+"AS29802":
+  display_name: "Hivelocity"
+  website: "https://www.hivelocity.net/dedicated-servers"
+  incidents: "https://stats.uptimerobot.com/PZ2Pxu0kAL"
+  
+"AS29802_Haarlem":
+  display_name: "Edgevana"
+  website: "https://nodes.edgevana.com/launch"
+  tags: ["solana-focused"]
+  notes: "Edgevana use this Hivelocity location"
+  
+"AS29802_Staten Island":
+  display_name: "Edgevana"
+  website: "https://nodes.edgevana.com/launch"
+  tags: ["solana-focused"]
+  notes: "Edgevana use this Hivelocity location"
+  
+"AS29802_Los Angeles (Central-Alameda)":
+  display_name: "Edgevana"
+  website: "https://nodes.edgevana.com/launch"
+  tags: ["solana-focused"]
+  notes: "Edgevana use this Hivelocity location"
+
+# Velia.net — German bare-metal provider
+# Validators: 13 | Stake: 2%
+# has reselling program https://www.velia.net/reseller-program
+"AS29066":
+  display_name: "velia.net"
+  website: "http://velia.net/dedicated-server/#discover-all-servers"
+  tags: ["solana-focused", "DZ-partner"]
+  notes: "We’re excited to welcome velia_net as the newest network contributor to DoubleZero: https://x.com/doublezero/status/2028837391834710175"
+
+# Tier.Net — bare-metal hosting   # ?
+# Validators: 5 | Stake: 2%
+# has referral program https://www.tier.net/affiliate
+"AS397423":
+  display_name: "Tier.Net"
+  website: "https://www.tier.net/dedicated-server-hosting"
+
+# SYNLINQ — German dedicated server provider (Frankfurt, Bremen, Munich)
+# Validators: 24 | Stake: 5%
+"AS44486":
+  display_name: "SYNLINQ"
+  website: "https://synlinq.com/dedicated-server-in-frankfurt-2/"
+
+# Limestone Networks — US/JP bare-metal hosting
+# Validators: 7 | Stake: 4%
+"AS46475":
+  display_name: "Limestone"
+  website: "https://www.limestonenetworks.com/pricing/bare-metal-cloud"
+
+# Servers.com — bare-metal hosting, multiple regions
+# Validators: 25 | Stake: 4%
+"AS7979":
+  display_name: "Servers.com"
+  website: "https://www.servers.com"
+  incidents: "https://status-servers.com"
+
+# AS262287 — likely Latitude.sh-affiliated AS in BR/Latin America   # ?
+# Validators: 34 | Stake: 4%
+"AS262287":
+  display_name: "Latitude.sh"
+  website: "https://www.latitude.sh/features"
+  incidents: "https://status.latitude.sh"
+  tags: ["solana-focused", "DZ-partner"]
+  notes: "The best servers for Solana RPC and Validator nodes: https://www.latitude.sh/blog/the-best-servers-for-solana-rpc-and-validator-nodes | Please welcome LatitudeSH to the DoubleZero project as a network contributor: https://x.com/doublezero/status/1957464485532258447"
+
+# Fiberstate — US dedicated hosting
+# Validators: 28 | Stake: 4%
+# has referral program https://billing.fiberstate.com/affiliates.php
+"AS26042":
+  display_name: "Fiberstate"
+  website: "https://billing.fiberstate.com/index.php?rp=/store/bare-metal"
+  incidents: "https://billing.fiberstate.com/serverstatus.php"
+
+# Helius — Solana RPC/infra provider, runs its own infrastructure
+# Validators: 2 | Stake: 4%
+"AS399460":
+  display_name: "Helius"
+  website: "https://helius.dev"
+  tags: ["private"]
+  notes: "Helius runs its own infrastructure"
+
+# AS-GLXY-DIGITAL — Galaxy Digital (institutional crypto firm)
+# Validators: 5 | Stake: 3%
+"AS400963":
+  display_name: "Galaxy Digital LP"
+  website: "https://www.galaxy.com"
+  tags: ["private"]
+  notes: "Galaxy runs its own infrastructure"
+
+# Amarutu Technology — Asia-focused bare-metal provider
+# Validators: 47 | Stake: 3%
+"AS206264":
+  display_name: "Amarutu"
+  website: "https://koddos.net/amd-dedicated-server.html"
+  incidents: "https://status.koddos.net"
+
+# Albahost: DE/NL looks like in Albania
+"AS48014":
+  display_name: "AlbHost"
+  website: "https://www.albahost.net/category/premium-dedicated-servers/premium-amd-epyc-servers"
+  incidents: "https://status.albahost.net"
+
+# ServeTheWorld: Oslo servers
+"AS34989":
+  display_name: "ServeTheWorld"
+  website: "https://stw.no/en/dedicated-server"
+
+# RETN — European backbone/cloud provider
+# Validators: 4 | Stake: 3%
+"AS9002":
+  display_name: "RETN"
+  website: "https://retn.net"
+
+# Amazon AWS (commercial)
+# Validators: 9 | Stake: 3%
+"AS16509":
+  display_name: "Amazon"
+  website: "https://aws.amazon.com"
+
+# Amazon AES — Amazon's separate AES network ASN
+# Validators: 2 | Stake: 3%
+"AS14618":
+  display_name: "Amazon"
+  website: "https://aws.amazon.com"
+
+# CDN77 — content delivery network with some bare-metal offering
+# Validators: 12 | Stake: 3%
+"AS60068":
+  display_name: "DataCamp"
+  website: "https://www.datacamp.co.uk"
+
+# Payward (Kraken) — exchange-operated ASN
+# Validators: 2 | Stake: 2%
+"AS1072":
+  display_name: "Payward"
+  website: "https://www.payward.com"
+  tags: ["private"]
+  notes: "Payward = Kraken exchange's infrastructure ASN"
+
+# Google
+# Validators: 3 | Stake: 2%
+"AS15169":
+  display_name: "Google LLC"
+  website: "https://cloud.google.com"
+
+# Hetzner — banned for Solana validators since 2022
+# Few validators may have legacy IPs grandfathered; not recommended for new setups
+# Validators: 5 | Stake: 1.5%
+"AS24940":
+  display_name: "Hetzner"
+  website: "https://www.hetzner.com"
+  incidents: "https://status.hetzner.com"
+  tags: ["banned"]
+  notes: "Hetzner blocked Solana validators in 2022; most operators have left. Any remaining presence is legacy or non-validator infrastructure."
+
+
+
+# velia.net (US AS) — same brand as AS29066, US presence (St Louis)
+# Validators: 6 | Stake: 0.65%
+"AS30083":
+  display_name: "velia.net"
+  website: "http://velia.net/dedicated-server/#discover-all-servers"
+  tags: ["solana-focused", "DZ-partner"]
+  notes: "We’re excited to welcome velia_net as the newest network contributor to DoubleZero: https://x.com/doublezero/status/2028837391834710175"
+
+# ReliableSite — US dedicated server provider
+# Validators: 7 | Stake: 0.64%
+# has referral program https://www.reliablesite.net/dedicated-servers/affiliate-program.aspx
+"AS23470":
+  display_name: "ReliableSite"
+  website: "https://www.reliablesite.net/dedicated-servers"
+  tags: ["solana-focused"]
+
+# Scalaxy (3NT/managed) — NL/US bare-metal, AMD EPYC servers
+# Validators: 10 | Stake: 1.32%
+"AS58061":
+  display_name: "Scalaxy"
+  website: "https://scalaxy.com/#baremetal-pricing"
+  tags: ["solana-focused"]
+
+# DedicatedNodes — NL crypto-node-focused hosting
+# Validators: 9 | Stake: 0.42%
+# has referral program https://portal.dedicatednodes.io/affiliates.php
+"AS214783":
+  display_name: "DedicatedNodes"
+  website: "https://www.dedicatednodes.io/solana-servers/#solana-servers-offer"
+  tags: ["solana-focused"]
+
+# Decentra Cloud
+# Validators: 8 | Stake: 0.23%
+"AS402479":
+  display_name: "Decentra Cloud"
+  website: "https://decentra.cloud"
+  tags: ["solana-focused"]
+  
+# VeloxServ — UK dedicated/colocation provider (London)
+# Validators: 2 | Stake: 1.34%
+"AS3170":
+  display_name: "VeloxServ"
+  website: "https://www.veloxserv.co.uk/host/dedicated-servers"
+
+# Leaseweb (Netherlands) — large global bare-metal provider
+# Validators: 3 | Stake: 1.16%
+"AS60781":
+  display_name: "Leaseweb"
+  website: "https://www.leaseweb.com/en/products-services/dedicated-servers"
+  incidents: "https://www.leasewebstatus.com"
+
+# uvensys — German IT/hosting provider
+# Validators: 3 | Stake: 1.12%
+"AS58010":
+  display_name: "uvensys"
+  website: "https://www.uvensys.de"
+
+# MasterDC (ANAFRA-AS) — Czech hosting provider (Prague)
+# Validators: 3 | Stake: 1.05%
+"AS201265":
+  display_name: "MasterDC"
+  website: "https://www.masterdc.com/dedicated-server-europe"
+
+# Adman
+# Validators: 6 | Stake: 0.94%
+# has referral program https://adman.com/pages/partners/
+"AS57494":
+  display_name: "Adman"
+  website: "https://adman.com"
+
+# Cogent — global tier-1 backbone/transit (treat as network, not DC)
+# Validators: 8 | Stake: 0.94%
+"AS174":
+  display_name: "Cogent"
+  website: "https://www.cogentco.com"
+
+# netcup — German VPS/dedicated provider (Nürnberg)
+# Validators: 2 | Stake: 0.87%
+"AS197540":
+  display_name: "netcup"
+  website: "https://www.netcup.com/en/server/dedicated-server"
+  incidents: "https://www.netcup-status.de"
+
+# Alibaba Cloud — Chinese cloud giant
+# Validators: 5 | Stake: 0.76%
+"AS45102":
+  display_name: "Alibaba"
+  website: "https://www.alibabacloud.com/en/product/dedicated-host"
+
+# HOSTKEY — NL/DE/RU bare-metal and GPU servers
+# Validators: 3 | Stake: 0.73%
+# has referral program https://hostkey.com/about-us/affiliate-program/
+"AS57043":
+  display_name: "HOSTKEY"
+  website: "https://hostkey.com/dedicated-servers"
+
+# GorillaServers — US dedicated server provider (Utah/Vegas)
+# Validators: 10 | Stake: 0.45%
+"AS53850":
+  display_name: "GorillaServers"
+  website: "https://www.gorillaservers.com"
+  incidents: "https://www.gorillaservers.com/outage.html"
+
+# Hurricane Electric — US tier-2 backbone/colo (Fremont)
+# Validators: 1 | Stake: 0.33%
+"AS6939":
+  display_name: "Hurricane Electric"
+  website: "https://he.net"
+
+# Butterfly Research
+# Validators: 7 | Stake: 0.53%
+"AS3402":
+  display_name: "Butterfly Research"
+
+# Google (YouTube ASN) — same as Google Cloud essentially
+# Validators: 1 | Stake: 0.33%
+"AS43515":
+  display_name: "Google LLC"
+  website: "https://cloud.google.com"
+
+# VNET — Slovak hosting provider (Bratislava)
+# Validators: 4 | Stake: 0.32%
+"AS29405":
+  display_name: "VNET"
+  website: "https://www.vnet.sk/sk/biznis/data/dedikovany-server"
+
+# 23M / 23media (TTM) — German dedicated server provider
+# Validators: 9 | Stake: 0.31%
+"AS47447":
+  display_name: "23M"
+  website: "https://23m.com/en"
+  incidents: "https://status.23m.com"
+
+# Flexential — US colocation/datacenter (Charlotte)
+# Validators: 2 | Stake: 0.17%
+"AS13649":
+  display_name: "Flexential"
+  website: "https://www.flexential.com"
+  incidents: "https://status.flexential.com"
+
+# M247 — global bare-metal/VPS provider
+# Validators: 2 | Stake: 0.15%
+"AS9009":
+  display_name: "M247"
+  website: "https://www.m247global.com/dedicated-server"
+
+# ARTERIA / USEN — Japanese network/hosting (Tokyo)
+# Validators: 2 | Stake: 0.14%
+"AS17506":
+  display_name: "ARTERIA Networks"
+  website: "https://www.arteria-net.com/en"
+
+# Fornex — EU/RU hosting provider (Frankfurt)
+# Validators: 1 | Stake: 0.12%
+# has referral program https://fornex.com/help/partner-program
+"AS44051":
+  display_name: "Fornex"
+  website: "https://fornex.com/dedicated-servers"
+
+# Host Color (HOSTCOLOR)
+# Validators: 2 | Stake: 0.12%
+# has referral program https://www.hostcolor.com/affiliateprogram/
+"AS46873":
+  display_name: "Host Color"
+  website: "https://www.hostcolor.com/dedicatedhosting/bare-metal-servers.html"
+
+# GSL Networks — AU/global network provider (Frankfurt presence)
+# Validators: 1 | Stake: 0.12%
+"AS137409":
+  display_name: "GSL Networks"
+  website: "https://globalsecurelayer.com"
+  incidents: "https://www.gslstatus.com"
+
+# DataBank (DFW) — US datacenter operator (Dallas/Bluffdale)
+# Validators: 2 | Stake: 0.09%
+"AS13767":
+  display_name: "DataBank"
+  website: "https://www.databank.com"
+
+# Delta HighTech (DELTA-BG) — Bulgarian hosting (Sofia)
+# Validators: 2 | Stake: 0.08%
+# has referral program https://delta.bg/en/affiliates
+"AS8860":
+  display_name: "Delta HighTech"
+  website: "https://delta.bg/en/dedicated-servers"
+
+# Miran — Russian hosting/colo (St Petersburg)
+# Validators: 3 | Stake: 0.07%
+"AS41722":
+  display_name: "Miran"
+  website: "https://miran.ru/services/dedicated"
+
+# Blacknight — Irish hosting provider (Dublin)
+# Validators: 2 | Stake: 0.06%
+"AS39122":
+  display_name: "Blacknight"
+  website: "https://www.blacknight.com/servers"
+  incidents: "https://status.blacknight.tech"
+
+# Leaseweb (APAC Singapore) — same brand as AS60781
+# Validators: 1 | Stake: 0.06%
+"AS59253":
+  display_name: "Leaseweb"
+  website: "https://www.leaseweb.com/en/products-services/dedicated-servers"
+  incidents: "https://www.leasewebstatus.com"
+  notes: "Leaseweb Singapore APAC ASN"
+
+# Contabo — German budget VPS/dedicated (Munich)
+# Validators: 1 | Stake: ~0%
+"AS51167":
+  display_name: "Contabo"
+  website: "https://contabo.com/en/dedicated-servers"
+  incidents: "https://contabo-status.com/"
+
+# Iron Mountain (IMDC) — US/global datacenter operator (Amsterdam)
+# Validators: 1 | Stake: 0.01%
+"AS12025":
+  display_name: "Iron Mountain"
+  website: "https://www.ironmountain.com/data-centers"
+
+# RockawayX (UAE) — same fund, Dubai presence
+# Validators: 1 | Stake: 0.21%
+"AS205064":
+  display_name: "RockawayX"
+  website: "https://rockawayx.com"
+  tags: ["private"]
+  notes: "RockawayX UAE/Dubai ASN (same as AS200871)"
+
+# RockawayX (EU) — crypto-infra fund running validator infrastructure (Prague)
+# Validators: 4 | Stake: 0.31%
+"AS200871":
+  display_name: "RockawayX"
+  website: "https://rockawayx.com"
+  tags: ["private"]
+  notes: "Crypto infrastructure fund running own validator nodes (EU/Prague)"
+
+# Twinstake — institutional staking provider
+# Validators: 1 | Stake: 0.73%
+"AS214434":
+  display_name: "Twinstake"
+  website: "https://www.twinstake.io"
+  tags: ["private"]
+  notes: "Institutional staking provider running own infrastructure"
+
+# Sovereign-Sol (BESOV) — Solana operator's own ASN (Anchorage)
+# Validators: 2 | Stake: 0.11%
+"AS19344":
+  display_name: "Sovereign-Sol"
+  website: "https://yontalabs.io"
+  tags: ["private"]
+  notes: "A Solana operator running own ASN"
+
+# Lucky Friday Labs (LFLL) — crypto operator own ASN (Ashburn)
+# Validators: 2 | Stake: 0.11%
+"AS27424":
+  display_name: "Lucky Friday Labs"
+  website: "https://luckyfriday.io"
+  tags: ["private"]
+  notes: "Crypto operator running own infrastructure"
+
+# 01node (AS-01NODE) — Solana/Cosmos staking operator own ASN (Bucharest)
+# Validators: 2 | Stake: 0.08%
+"AS41536":
+  display_name: "01node"
+  website: "https://01.ro"
+  tags: ["private"]
+  notes: "Staking operator running own infrastructure"
+
+# Hyperoptic — UK ISP/datacentre (BCUBE-AS, London/Acton)   # ?
+# Validators: 1 | Stake: 1.32%
+# has referral program https://www.hyperoptic.com/broadband/home/refer-and-earn/
+"AS56478":
+  display_name: "Hyperoptic"
+  website: "https://www.hyperoptic.com"
+  incidents: "https://www.hyperoptic.com/network-status"
+  tags: ["network-provider"]
+
+# Avantel — Russian regional provider (Samara)
+# Validators: 1 | Stake: 1.31%
+"AS197235":
+  display_name: "Avantel"
+  tags: ["network-provider"]
+
+# Fusix Networks — NL network/hosting provider
+# Validators: 2 | Stake: 1.13%
+"AS57866":
+  display_name: "Fusix"
+  website: "https://fusix.nl"
+  tags: ["network-provider"]
+
+# Orange España — Spanish telecom (Madrid)
+# Validators: 1 | Stake: 1.07%
+"AS12479":
+  display_name: "Orange España"
+  website: "https://www.orange.es"
+  tags: ["network-provider"]
+
+# Freedom Internet — Dutch ISP
+# Validators: 1 | Stake: 1.07%
+"AS206238":
+  display_name: "Freedom Internet"
+  website: "https://www.freedom.nl"
+  tags: ["network-provider"]
+
+# Cablevision (Optimum/Altice USA) — US residential ISP
+# Validators: 1 | Stake: 1.07%
+"AS6128":
+  display_name: "Optimum"
+  website: "https://www.optimum.net"
+  tags: ["network-provider"]
+
+# SkyNet
+# Validators: 1 | Stake: 0.38%
+"AS35807":
+  display_name: "SkyNet"
+  website: "https://www.skynet.ru"
+  tags: ["network-provider"]
+
+# SK Broadband — Korean telecom (Seoul)
+# Validators: 3 | Stake: 0.20%
+"AS9318":
+  display_name: "SK Broadband"
+  website: "https://www.bworld.co.kr"
+  tags: ["network-provider"]
+
+# Vorboss — UK business ISP (London)
+# Validators: 4 | Stake: 0.18%
+"AS25160":
+  display_name: "Vorboss"
+  website: "https://vorboss.com"
+  tags: ["network-provider"]
+
+# inter.link — German network/connectivity provider (Berlin)
+# Validators: 2 | Stake: 0.12%
+"AS5405":
+  display_name: "inter.link"
+  website: "https://inter.link"
+  tags: ["network-provider"]
+
+# Lovitel (LEALTA-AS)
+# Validators: 3 | Stake: 0.10%
+"AS41275":
+  display_name: "Lovitel"
+  website: "https://lovit.ru"
+  tags: ["network-provider"]
+
+# Evolus IT Solutions — AT/DE hosting
+# Validators: 2 | Stake: 0.09%
+"AS215120":
+  display_name: "Evolus"
+  website: "https://evolusfibre.com"
+  incidents: "https://evolusfibre.com/servicestatus"
+  tags: ["network-provider"]
+
+# ============================================================================
+# ASN_CITY-LEVEL OVERRIDES (specific DC location, overrides ASN-level)
+# Use ONLY when a specific city has a different brand from the ASN owner
+# ============================================================================
+
+# Examples of when these are needed:
+#   - Edgevana resells Vultr (AS20473) in specific regions like Singapore
+#   - Cherry has multiple ASNs but specific city branding
+#   - Hivelocity hosts Edgevana in specific cities (per Edgevana dashboard)
+#
+# Currently empty — populate as needed when validating actual data.
+# Use this format:
+#
+# "AS20473_Singapore":
+#   display_name: "Edgevana Singapore"
+#   website: "https://edgevana.com"
+#   notes: "Edgevana resells Vultr in Singapore"
+#   tags: ["solana-focused", "resold"]

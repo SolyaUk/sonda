@@ -75,10 +75,6 @@ overrides:
   city: Amsterdam
   source: doublezero-verified
   dz_device_name: ams001-dz002
-- ip: 149.13.98.2
-  city: Warsaw
-  source: doublezero-verified
-  dz_device_name: dz-waw-01
 - ip: 149.6.154.67
   city: Marseille
   source: doublezero-verified
@@ -99,10 +95,10 @@ overrides:
   city: Amsterdam
   source: doublezero-verified
   dz_device_name: dz-ams-01
-- ip: 154.58.208.2
-  city: Madrid
+- ip: 180.189.48.66
+  city: Tokyo
   source: doublezero-verified
-  dz_device_name: dz-mad-01
+  dz_device_name: dzd-ty15-001
 - ip: 180.87.146.210
   city: Hong Kong
   source: doublezero-verified
@@ -167,10 +163,6 @@ overrides:
   city: Pittsburgh
   source: doublezero-verified
   dz_device_name: dz103a-pit1-tsw
-- ip: 204.174.19.71
-  city: Dallas
-  source: doublezero-verified
-  dz_device_name: laconic-dfw-sw01
 - ip: 208.185.121.234
   city: Dallas
   source: doublezero-verified
@@ -195,10 +187,6 @@ overrides:
   city: Toronto
   source: doublezero-verified
   dz_device_name: dz-tor1-sw01
-- ip: 209.42.167.133
-  city: Miami
-  source: doublezero-verified
-  dz_device_name: laconic-mia-sw01
 - ip: 213.155.141.98
   city: Dublin
   source: doublezero-verified
@@ -275,6 +263,10 @@ overrides:
   city: Dallas
   source: doublezero-verified
   dz_device_name: dfw001-dz001
+- ip: 38.32.242.113
+  city: Columbus
+  source: doublezero-verified
+  dz_device_name: cmh001-dz001
 - ip: 38.79.153.2
   city: Frankfurt
   source: doublezero-verified
@@ -335,10 +327,6 @@ overrides:
   city: London
   source: doublezero-verified
   dz_device_name: swdzd01-lon2
-- ip: 64.92.84.81
-  city: Washington DC
-  source: doublezero-verified
-  dz_device_name: laconic-was-sw01
 - ip: 66.198.11.74
   city: Washington DC
   source: doublezero-verified

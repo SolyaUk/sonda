@@ -79,7 +79,7 @@ PRUNE_HOUR = 4                  # 04:00 UTC Sunday
 WAL_CHECKPOINT_INTERVAL = 3600  # Every 1 hour
 
 BACKUP_RETENTION_DAYS = 7       # How long to keep local backups
-PRUNE_DATA_KEEP_DAYS = 90       # Passed to timeseries.prune_old_data
+PRUNE_DATA_KEEP_DAYS = 0        # 0 = never prune. SONDA is an accumulating archive (CHARTER).
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +329,11 @@ class ClusterWorker:
         geo_overrides = self.sonda_scripts / "geo_overrides.yaml"
 
         api_keys = self.global_cfg.get("api_keys") or {}
-        rpc_url = self.cfg.get("rpc_url") or ""
+        # v6.9: rpc_urls is an ordered list (primary first). The old single
+        # rpc_url key still works so older configs need no change.
+        rpc_urls = self.cfg.get("rpc_urls") or ([self.cfg["rpc_url"]] if self.cfg.get("rpc_url") else [])
+        if isinstance(rpc_urls, str):
+            rpc_urls = [rpc_urls]
 
         argv = [
             self.python_exe, str(analyzer),
@@ -339,8 +343,8 @@ class ClusterWorker:
             "--export",
             "--output", str(output_path),
         ]
-        if rpc_url:
-            argv += ["--rpc-url", rpc_url]
+        for url in rpc_urls:
+            argv += ["--rpc-url", url]
         if endpoints.exists():
             argv += ["--endpoints", str(endpoints)]
         if geo_overrides.exists():
@@ -599,8 +603,10 @@ class Maintenance:
                 except Exception:
                     pass
 
-        # Weekly prune on Sunday PRUNE_HOUR:00 UTC
-        if (now.weekday() == 6 and now.hour >= PRUNE_HOUR
+        # Weekly prune on Sunday PRUNE_HOUR:00 UTC. Disabled when
+        # PRUNE_DATA_KEEP_DAYS is 0 (v6.9): the 90-day prune deleted a month
+        # of node_changes/ip_changes/new_entities before it was noticed.
+        if (PRUNE_DATA_KEEP_DAYS > 0 and now.weekday() == 6 and now.hour >= PRUNE_HOUR
                 and self.state.get("last_prune_date") != today):
             try:
                 stats = self.ts.prune_old_data(PRUNE_DATA_KEEP_DAYS)

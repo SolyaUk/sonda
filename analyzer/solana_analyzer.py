@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.8
+Solana Network Decentralization Analyzer v3.9
 ==============================================
+Changes from v3.8 (pipeline v6.9, 2026-08-27):
+- RPC fallback chain: --rpc-url may be repeated (primary first). Critical
+  calls (gossip, validators, epoch-info) fail over to the next URL when the
+  active one exhausts its retry budget. Failover is sticky for the run.
+- The critical retry loop in run_solana_cmd has a wall-clock budget now.
+  A dead RPC used to keep the analyzer retrying until the orchestrator
+  killed it at 900s; it now gives up after the budget and exits cleanly.
+
 Changes from v3.7:
 - DB-IP geolocation fetch made resilient. Previously a single transient error
   (rate limit, network blip, errorCode in JSON) raised PrimarySourceError that
@@ -113,6 +121,13 @@ DBIP_BATCH_SIZE = 100
 CONCURRENT_WORKERS = 20
 RPC_RETRIES = 3
 RPC_TIMEOUT = 30
+# Wall-clock budgets for critical CLI calls (gossip, validators, epoch-info).
+# With a single RPC URL the analyzer keeps retrying up to RPC_CRITICAL_BUDGET
+# seconds (covers real transient RPC lag). With a fallback chain each URL
+# gets RPC_URL_BUDGET seconds before the analyzer moves to the next one.
+# Keep len(chain) * RPC_URL_BUDGET well below the orchestrator's 900s.
+RPC_CRITICAL_BUDGET = 300
+RPC_URL_BUDGET = 120
 EP_CHECK_TIMEOUT = 4
 EP_CHECK_RETRIES = 2
 EP_CHECK_COOLDOWN = 0.1  # seconds between batches of checks
@@ -250,6 +265,110 @@ class DBIPQuotaError(PrimarySourceError):
 
 
 # ========================================================================
+# COUNTRY CODE → (NAME, CONTINENT CODE) MAPPING
+# ========================================================================
+# Used to fill country name + continent when a fallback geo source (e.g.
+# IPInfo) returns only a 2-letter country code without full name/continent.
+# DB-IP provides these directly; IPInfo and some others do not. Without this
+# map, such records get country="Unknown" and empty continent_code, which
+# breaks aggregation by country/continent. (v6.x bugfix)
+#
+# Continent codes: AF=Africa, AN=Antarctica, AS=Asia, EU=Europe,
+#                  NA=North America, OC=Oceania, SA=South America
+COUNTRY_INFO = {
+    "AD": ("Andorra", "EU"), "AE": ("United Arab Emirates", "AS"),
+    "AF": ("Afghanistan", "AS"), "AG": ("Antigua and Barbuda", "NA"),
+    "AL": ("Albania", "EU"), "AM": ("Armenia", "AS"), "AO": ("Angola", "AF"),
+    "AR": ("Argentina", "SA"), "AT": ("Austria", "EU"), "AU": ("Australia", "OC"),
+    "AZ": ("Azerbaijan", "AS"), "BA": ("Bosnia and Herzegovina", "EU"),
+    "BB": ("Barbados", "NA"), "BD": ("Bangladesh", "AS"), "BE": ("Belgium", "EU"),
+    "BF": ("Burkina Faso", "AF"), "BG": ("Bulgaria", "EU"), "BH": ("Bahrain", "AS"),
+    "BJ": ("Benin", "AF"), "BM": ("Bermuda", "NA"), "BN": ("Brunei", "AS"),
+    "BO": ("Bolivia", "SA"), "BR": ("Brazil", "SA"), "BS": ("Bahamas", "NA"),
+    "BT": ("Bhutan", "AS"), "BW": ("Botswana", "AF"), "BY": ("Belarus", "EU"),
+    "BZ": ("Belize", "NA"), "CA": ("Canada", "NA"), "CD": ("DR Congo", "AF"),
+    "CF": ("Central African Republic", "AF"), "CG": ("Congo", "AF"),
+    "CH": ("Switzerland", "EU"), "CI": ("Côte d'Ivoire", "AF"), "CL": ("Chile", "SA"),
+    "CM": ("Cameroon", "AF"), "CN": ("China", "AS"), "CO": ("Colombia", "SA"),
+    "CR": ("Costa Rica", "NA"), "CU": ("Cuba", "NA"), "CV": ("Cape Verde", "AF"),
+    "CY": ("Cyprus", "AS"), "CZ": ("Czechia", "EU"), "DE": ("Germany", "EU"),
+    "DJ": ("Djibouti", "AF"), "DK": ("Denmark", "EU"), "DM": ("Dominica", "NA"),
+    "DO": ("Dominican Republic", "NA"), "DZ": ("Algeria", "AF"),
+    "EC": ("Ecuador", "SA"), "EE": ("Estonia", "EU"), "EG": ("Egypt", "AF"),
+    "ER": ("Eritrea", "AF"), "ES": ("Spain", "EU"), "ET": ("Ethiopia", "AF"),
+    "FI": ("Finland", "EU"), "FJ": ("Fiji", "OC"), "FK": ("Falkland Islands", "SA"),
+    "FM": ("Micronesia", "OC"), "FO": ("Faroe Islands", "EU"), "FR": ("France", "EU"),
+    "GA": ("Gabon", "AF"), "GB": ("United Kingdom", "EU"), "GD": ("Grenada", "NA"),
+    "GE": ("Georgia", "AS"), "GF": ("French Guiana", "SA"), "GG": ("Guernsey", "EU"),
+    "GH": ("Ghana", "AF"), "GI": ("Gibraltar", "EU"), "GL": ("Greenland", "NA"),
+    "GM": ("Gambia", "AF"), "GN": ("Guinea", "AF"), "GP": ("Guadeloupe", "NA"),
+    "GQ": ("Equatorial Guinea", "AF"), "GR": ("Greece", "EU"), "GT": ("Guatemala", "NA"),
+    "GU": ("Guam", "OC"), "GW": ("Guinea-Bissau", "AF"), "GY": ("Guyana", "SA"),
+    "HK": ("Hong Kong", "AS"), "HN": ("Honduras", "NA"), "HR": ("Croatia", "EU"),
+    "HT": ("Haiti", "NA"), "HU": ("Hungary", "EU"), "ID": ("Indonesia", "AS"),
+    "IE": ("Ireland", "EU"), "IL": ("Israel", "AS"), "IM": ("Isle of Man", "EU"),
+    "IN": ("India", "AS"), "IQ": ("Iraq", "AS"), "IR": ("Iran", "AS"),
+    "IS": ("Iceland", "EU"), "IT": ("Italy", "EU"), "JE": ("Jersey", "EU"),
+    "JM": ("Jamaica", "NA"), "JO": ("Jordan", "AS"), "JP": ("Japan", "AS"),
+    "KE": ("Kenya", "AF"), "KG": ("Kyrgyzstan", "AS"), "KH": ("Cambodia", "AS"),
+    "KI": ("Kiribati", "OC"), "KM": ("Comoros", "AF"), "KN": ("Saint Kitts and Nevis", "NA"),
+    "KP": ("North Korea", "AS"), "KR": ("South Korea", "AS"), "KW": ("Kuwait", "AS"),
+    "KY": ("Cayman Islands", "NA"), "KZ": ("Kazakhstan", "AS"), "LA": ("Laos", "AS"),
+    "LB": ("Lebanon", "AS"), "LC": ("Saint Lucia", "NA"), "LI": ("Liechtenstein", "EU"),
+    "LK": ("Sri Lanka", "AS"), "LR": ("Liberia", "AF"), "LS": ("Lesotho", "AF"),
+    "LT": ("Lithuania", "EU"), "LU": ("Luxembourg", "EU"), "LV": ("Latvia", "EU"),
+    "LY": ("Libya", "AF"), "MA": ("Morocco", "AF"), "MC": ("Monaco", "EU"),
+    "MD": ("Moldova", "EU"), "ME": ("Montenegro", "EU"), "MG": ("Madagascar", "AF"),
+    "MH": ("Marshall Islands", "OC"), "MK": ("North Macedonia", "EU"),
+    "ML": ("Mali", "AF"), "MM": ("Myanmar", "AS"), "MN": ("Mongolia", "AS"),
+    "MO": ("Macao", "AS"), "MQ": ("Martinique", "NA"), "MR": ("Mauritania", "AF"),
+    "MT": ("Malta", "EU"), "MU": ("Mauritius", "AF"), "MV": ("Maldives", "AS"),
+    "MW": ("Malawi", "AF"), "MX": ("Mexico", "NA"), "MY": ("Malaysia", "AS"),
+    "MZ": ("Mozambique", "AF"), "NA": ("Namibia", "AF"), "NC": ("New Caledonia", "OC"),
+    "NE": ("Niger", "AF"), "NG": ("Nigeria", "AF"), "NI": ("Nicaragua", "NA"),
+    "NL": ("Netherlands", "EU"), "NO": ("Norway", "EU"), "NP": ("Nepal", "AS"),
+    "NZ": ("New Zealand", "OC"), "OM": ("Oman", "AS"), "PA": ("Panama", "NA"),
+    "PE": ("Peru", "SA"), "PF": ("French Polynesia", "OC"), "PG": ("Papua New Guinea", "OC"),
+    "PH": ("Philippines", "AS"), "PK": ("Pakistan", "AS"), "PL": ("Poland", "EU"),
+    "PR": ("Puerto Rico", "NA"), "PS": ("Palestine", "AS"), "PT": ("Portugal", "EU"),
+    "PW": ("Palau", "OC"), "PY": ("Paraguay", "SA"), "QA": ("Qatar", "AS"),
+    "RE": ("Réunion", "AF"), "RO": ("Romania", "EU"), "RS": ("Serbia", "EU"),
+    "RU": ("Russia", "EU"), "RW": ("Rwanda", "AF"), "SA": ("Saudi Arabia", "AS"),
+    "SB": ("Solomon Islands", "OC"), "SC": ("Seychelles", "AF"), "SD": ("Sudan", "AF"),
+    "SE": ("Sweden", "EU"), "SG": ("Singapore", "AS"), "SI": ("Slovenia", "EU"),
+    "SK": ("Slovakia", "EU"), "SL": ("Sierra Leone", "AF"), "SM": ("San Marino", "EU"),
+    "SN": ("Senegal", "AF"), "SO": ("Somalia", "AF"), "SR": ("Suriname", "SA"),
+    "SS": ("South Sudan", "AF"), "SV": ("El Salvador", "NA"), "SY": ("Syria", "AS"),
+    "SZ": ("Eswatini", "AF"), "TC": ("Turks and Caicos Islands", "NA"),
+    "TD": ("Chad", "AF"), "TG": ("Togo", "AF"), "TH": ("Thailand", "AS"),
+    "TJ": ("Tajikistan", "AS"), "TL": ("Timor-Leste", "AS"), "TM": ("Turkmenistan", "AS"),
+    "TN": ("Tunisia", "AF"), "TO": ("Tonga", "OC"), "TR": ("Turkey", "AS"),
+    "TT": ("Trinidad and Tobago", "NA"), "TW": ("Taiwan", "AS"), "TZ": ("Tanzania", "AF"),
+    "UA": ("Ukraine", "EU"), "UG": ("Uganda", "AF"), "US": ("United States", "NA"),
+    "UY": ("Uruguay", "SA"), "UZ": ("Uzbekistan", "AS"), "VA": ("Vatican City", "EU"),
+    "VC": ("Saint Vincent and the Grenadines", "NA"), "VE": ("Venezuela", "SA"),
+    "VG": ("British Virgin Islands", "NA"), "VI": ("U.S. Virgin Islands", "NA"),
+    "VN": ("Vietnam", "AS"), "VU": ("Vanuatu", "OC"), "WS": ("Samoa", "OC"),
+    "YE": ("Yemen", "AS"), "YT": ("Mayotte", "AF"), "ZA": ("South Africa", "AF"),
+    "ZM": ("Zambia", "AF"), "ZW": ("Zimbabwe", "AF"),
+}
+
+def country_name_from_code(cc):
+    """Return full country name for a 2-letter code, or the code itself if unknown."""
+    if not cc or cc == "??":
+        return "Unknown"
+    info = COUNTRY_INFO.get(cc.upper())
+    return info[0] if info else cc
+
+def continent_from_code(cc):
+    """Return continent code for a 2-letter country code, or '' if unknown."""
+    if not cc or cc == "??":
+        return ""
+    info = COUNTRY_INFO.get(cc.upper())
+    return info[1] if info else ""
+
+
+# ========================================================================
 # DATA CLASSES
 # ========================================================================
 
@@ -361,11 +480,14 @@ class NodeInfo:
 # HELPERS
 # ========================================================================
 
-def run_solana_cmd(args, timeout=RPC_TIMEOUT, retries=RPC_RETRIES, desc="", critical=False):
+def run_solana_cmd(args, timeout=RPC_TIMEOUT, retries=RPC_RETRIES, desc="", critical=False, budget=None):
     """Execute solana CLI command with retries.
 
     critical=False (default): tries up to `retries` times, then returns None.
-    critical=True: retries forever with progressive backoff capped at 60s.
+    critical=True: retries with progressive backoff capped at 60s until the
+      wall-clock `budget` (seconds) is exhausted, then returns None.
+      budget=None keeps the pre-v3.9 behaviour (retry forever); SONDA
+      always passes a budget via SolanaNetworkAnalyzer._rpc_cli.
       Use for operations without which the snapshot is meaningless (gossip,
       validators, epoch). Handles transient Solana RPC issues gracefully —
       occasional "invalid type: integer `3`, expected a string" and similar
@@ -373,6 +495,7 @@ def run_solana_cmd(args, timeout=RPC_TIMEOUT, retries=RPC_RETRIES, desc="", crit
       but ensures data integrity. Only returns None on fatal Python errors.
     """
     attempt = 0
+    t0 = time.monotonic()
     while True:
         attempt += 1
         error_msg = None
@@ -397,8 +520,15 @@ def run_solana_cmd(args, timeout=RPC_TIMEOUT, retries=RPC_RETRIES, desc="", crit
 
         # error_msg is set if we need to retry
         if critical:
-            # Unlimited retry with progressive backoff: 2, 4, 8, 16, 32, 60, 60, ...
+            # Progressive backoff: 2, 4, 8, 16, 32, 60, 60, ... bounded by a
+            # wall-clock budget (v3.9). Without the budget a dead RPC kept the
+            # analyzer in this loop until the orchestrator killed it at 900s.
             wait = min(60, 2 ** attempt)
+            elapsed = time.monotonic() - t0
+            if budget is not None and elapsed + wait > budget:
+                logger.error(f"❌ {desc}: retry budget {budget}s exhausted after "
+                             f"{attempt} attempts ({elapsed:.0f}s): {error_msg}")
+                return None
             # Log first 3 attempts, then every 10th to avoid spam
             if attempt <= 3 or attempt % 10 == 0:
                 logger.warning(f"⚠️  {desc} fail (attempt {attempt}, retry in {wait}s): {error_msg}")
@@ -580,6 +710,187 @@ def version_tuple(ver):
 def truncate_id(s, n=13):
     return s if len(s) <= n else f"{s[:5]}...{s[-5:]}"
 
+# ========================================================================
+# CLIENT ID MAPPING
+# ========================================================================
+# Validator clients announce a numeric ID in gossip. Different sources name
+# the same code differently:
+#
+#   - Helius RPC (mainnet, modern): readable names like "JitoLabs",
+#     "AgaveBam", "HarmonicAgave" — most informative, distinguishes base
+#     client + active patches.
+#   - Official Solana RPC + CLI 4.1.0: only knows a few codes by name
+#     (JitoLabs, AgaveBam, Frankendancer, Agave, Firedancer); the rest are
+#     reported as "Unknown(N)".
+#   - Trillium API: "Name (N)" format like "Harmonic (10)", "Jito_BAM (6)".
+#
+# SONDA picks its own canonical set of names — readable, consistent, no
+# underscores, with brand short forms (Jito instead of JitoLabs) and
+# semantically accurate ("JitoBAM" not "AgaveBam" because that client is
+# the Jito client running with --bam-url, not Agave + BAM as the name suggests).
+#
+# All three sources (Helius, RPC/CLI, Trillium) are normalized via
+# normalize_client_id() to the SONDA canonical set. Frontend can rely on a
+# stable, consistent client_type regardless of which source provided the data.
+#
+# Codes verified by cross-referencing Helius clientId counts with Solana RPC
+# Unknown(N) counts and Trillium "Name (N)" counts on mainnet (2026-05) —
+# all three sources matched per code.
+CLIENT_ID_BY_CODE = {
+    0:  "Agave",
+    1:  "Jito",
+    2:  "Frankendancer",
+    3:  "Agave",
+    5:  "Firedancer",
+    6:  "JitoBAM",                   # Jito client running with --bam-url; Helius/CLI: "AgaveBam"; Trillium: "Jito_BAM"
+    7:  "FireBAM",                   # Firedancer-compatible BAM (Jito); rare, 1 seen on mainnet (2026-05)
+    8:  "Rakurai",
+    9:  "HarmonicMajor",             # Trillium: "Harmonic_Major" — kept without underscore for consistency
+    10: "HarmonicAgave",             # Trillium: "Harmonic"
+    11: "HarmonicFrankendancer",     # Trillium: "FD_Harmonic"
+    12: "HarmonicFiredancer",        # rare, 1 seen on mainnet (2026-05)
+    13: "Raiku",
+}
+
+# Trillium "Name (N)" → SONDA canonical mapping. When Trillium is used as a
+# fallback (e.g. if RPC didn't provide clientId for a validator), strip the
+# "(N)" suffix and translate Trillium-specific naming to our canonical form.
+TRILLIUM_TO_CANONICAL = {
+    "Agave":            "Agave",
+    "Jito_Labs":        "Jito",
+    "Frankendancer":    "Frankendancer",
+    "Firedancer":       "Firedancer",
+    "Jito_BAM":         "JitoBAM",
+    "Rakurai":          "Rakurai",
+    "Harmonic_Major":   "HarmonicMajor",
+    "Harmonic":         "HarmonicAgave",
+    "FD_Harmonic":      "HarmonicFrankendancer",
+    "Raiku":            "Raiku",
+}
+
+# Helius/CLI clientId → SONDA canonical mapping. Helius and CLI already give
+# readable names but with different conventions than ours (e.g. capitalization,
+# brand fullness). Normalize them to one consistent set.
+HELIUS_TO_CANONICAL = {
+    "Agave":                  "Agave",
+    "JitoLabs":               "Jito",                   # brand short form
+    "Frankendancer":          "Frankendancer",
+    "Firedancer":             "Firedancer",
+    "AgaveBam":               "JitoBAM",                # Jito client w/ BAM, not "Agave + BAM"
+    "FireBAM":                "FireBAM",
+    "Rakurai":                "Rakurai",
+    "Raiku":                  "Raiku",
+    "HarmonicAgave":          "HarmonicAgave",
+    "HarmonicFrankendancer":  "HarmonicFrankendancer",
+    "HarmonicFiredancer":     "HarmonicFiredancer",
+    "HarmonicMajor":          "HarmonicMajor",
+}
+
+def normalize_client_id(client_id):
+    """Normalize any client identifier to SONDA canonical form.
+
+    SONDA canonical names (single source of truth, used in snapshots & frontend):
+      Agave, Jito, Frankendancer, Firedancer, JitoBAM, FireBAM, Rakurai, Raiku,
+      HarmonicAgave, HarmonicFrankendancer, HarmonicFiredancer, HarmonicMajor,
+      Unknown (+ Unknown(N) for codes we don't know yet).
+
+    Source-specific behaviour:
+      - Helius RPC: clientId like "JitoLabs", "AgaveBam" → mapped via HELIUS_TO_CANONICAL.
+        E.g. "JitoLabs" → "Jito" (short brand form); "AgaveBam" → "JitoBAM"
+        (because this is the Jito client running with --bam-url, not Agave+BAM).
+      - Official Solana RPC + CLI: "Unknown(10)" → mapped via CLIENT_ID_BY_CODE
+        to the same canonical, so the result matches what Helius would give.
+      - Trillium: "Harmonic (10)" → mapped via TRILLIUM_TO_CANONICAL.
+
+    If the value matches no known pattern (e.g. a brand-new client we haven't
+    seen) we keep it as-is. Same for plain "Unknown" without a code.
+
+    Examples:
+      "JitoLabs"          → "Jito"               (Helius — normalized)
+      "AgaveBam"          → "JitoBAM"            (Helius — Jito w/ BAM)
+      "HarmonicAgave"     → "HarmonicAgave"      (Helius — kept)
+      "Unknown(10)"       → "HarmonicAgave"      (RPC/CLI — via code map)
+      "Unknown(6)"        → "JitoBAM"            (RPC/CLI — via code map)
+      "Harmonic (10)"     → "HarmonicAgave"      (Trillium — translated)
+      "Jito_BAM (6)"      → "JitoBAM"            (Trillium — translated)
+      "Unknown(99)"       → "Unknown(99)"        (unknown code, kept)
+      "Unknown"           → "Unknown"
+      None                → None
+    """
+    if not client_id or not isinstance(client_id, str):
+        return client_id
+    # Solana official RPC / CLI: "Unknown(10)" → canonical via code
+    m = re.match(r"^Unknown\((\d+)\)$", client_id)
+    if m:
+        code = int(m.group(1))
+        return CLIENT_ID_BY_CODE.get(code, client_id)
+    # Trillium: "Harmonic (10)" → translate base name to canonical
+    m = re.match(r"^(.+?)\s*\(\d+\)$", client_id)
+    if m:
+        base = m.group(1).strip()
+        return TRILLIUM_TO_CANONICAL.get(base, base)
+    # Helius/CLI: "JitoLabs" / "AgaveBam" / "HarmonicAgave" → canonical
+    if client_id in HELIUS_TO_CANONICAL:
+        return HELIUS_TO_CANONICAL[client_id]
+    # Plain "Unknown" or anything else we haven't seen — kept as-is
+    return client_id
+
+def _parse_commission(val):
+    """Extract commission as a percentage, supporting both CLI formats.
+
+    CLI 4.1.0-beta.1 renamed the field: `commission` (integer percent) became
+    `commissionBps` (basis points, 500 = 5%). We try the new field first, then
+    fall back to the old one — so if Anza reverts the name, we keep working
+    either way. (v6.x bugfix)
+
+    Returns a float percentage (e.g. 5.0) or None if neither field present.
+    """
+    bps = val.get("commissionBps")
+    if bps is not None:
+        try:
+            return float(bps) / 100.0
+        except (ValueError, TypeError):
+            return None
+    old = val.get("commission")
+    if old is not None:
+        try:
+            return float(old)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+def is_truncated_pubkey(name, vote_account=None, identity=None):
+    """Detect Trillium placeholder names that are just a truncated pubkey.
+
+    When a validator has no real name, Trillium's API returns a truncated
+    pubkey like 'HZKop...BSpEc' (format: 5 chars + '...' + 5 chars) as a
+    placeholder. We must reject these — a missing name should stay null so
+    the frontend can decide how to display it, not show a useless truncated
+    key as if it were a chosen name. See backlog / v6.x bugfix.
+
+    Returns True if `name` looks like a truncated pubkey. If vote_account or
+    identity is provided, we additionally confirm the truncation matches
+    (prefix+suffix), which avoids false positives on real short names that
+    happen to contain '...'.
+    """
+    if not name or not isinstance(name, str):
+        return False
+    m = re.match(r"^([A-Za-z0-9]{4,6})\.\.\.([A-Za-z0-9]{4,6})$", name)
+    if not m:
+        return False
+    prefix, suffix = m.group(1), m.group(2)
+    # If we have the source keys, confirm match for certainty
+    for key in (vote_account, identity):
+        if key and key.startswith(prefix) and key.endswith(suffix):
+            return True
+    # No source keys to confirm against — but the pattern alone is a strong
+    # signal (real validator names virtually never look like 'Xxxxx...Yyyyy').
+    # If neither key was provided, treat the pattern match as sufficient.
+    if vote_account is None and identity is None:
+        return True
+    # Keys were provided but didn't match — keep the name (rare real name)
+    return False
+
 def normalize_city(city):
     """Strip district/neighborhood in parentheses for metric aggregation.
     'Frankfurt am Main (Rödelheim)' → 'Frankfurt am Main'
@@ -661,8 +972,21 @@ class GeoCache:
                                     d['discrepancy_alternatives'] = None
                                 # Remove any unexpected fields from older cache versions
                                 d = {k: v for k, v in d.items() if k in valid_fields}
-                                result[ip] = GeolocationData(**d)
-                                result[ip].cached_at = cat
+                                geo_obj = GeolocationData(**d)
+                                geo_obj.cached_at = cat
+                                # Backfill country name + continent for cached entries
+                                # that predate the country mapping fix. Cache may hold
+                                # country="Unknown"/empty + empty continent_code while
+                                # having a valid country_code (common when the cached
+                                # result came from IPInfo). Fill from COUNTRY_INFO so
+                                # old cache rows don't keep showing Unknown. (v6.x)
+                                cc = geo_obj.country_code
+                                if cc and cc != "??":
+                                    if not geo_obj.country or geo_obj.country == "Unknown":
+                                        geo_obj.country = country_name_from_code(cc)
+                                    if not geo_obj.continent_code:
+                                        geo_obj.continent_code = continent_from_code(cc)
+                                result[ip] = geo_obj
                             except Exception:
                                 pass  # Skip corrupted entries, will re-fetch
         except Exception as e: logger.warning(f"⚠️  Geo cache read failed: {e}")
@@ -945,6 +1269,10 @@ class GeolocationService:
         elif ipinfo:
             geo.primary_source = "ipinfo"
             geo.country_code = ipinfo.get("country", "??")
+            # IPInfo returns only a 2-letter country code (no full name/continent).
+            # Fill them from our mapping so aggregation by country/continent works.
+            geo.country = country_name_from_code(geo.country_code)
+            geo.continent_code = continent_from_code(geo.country_code)
             geo.city = ipinfo.get("city", "Unknown"); geo.region = ipinfo.get("region", "")
             loc = ipinfo.get("loc", "").split(",")
             geo.latitude = float(loc[0]) if len(loc)>0 and loc[0] else 0.0
@@ -1110,7 +1438,13 @@ class SolanaNetworkAnalyzer:
     def __init__(self, dbip_key="", ipinfo_token="", cluster="mainnet-beta", endpoints_config="endpoints.yaml",
                  rpc_url=None, geo_overrides_path=None):
         self.cluster = cluster
-        self.cluster_url = rpc_url or CLUSTER_URLS.get(cluster, CLUSTER_URLS["mainnet-beta"])
+        # v3.9: rpc_url is a single URL or an ordered list (primary first).
+        # self.cluster_url is the ACTIVE URL and is updated on failover, so
+        # every CLI call and JSON-RPC request in this run follows it.
+        urls = rpc_url if isinstance(rpc_url, (list, tuple)) else ([rpc_url] if rpc_url else [])
+        self.rpc_urls = [u for u in urls if u] or [CLUSTER_URLS.get(cluster, CLUSTER_URLS["mainnet-beta"])]
+        self.cluster_url = self.rpc_urls[0]
+        self._rpc_dead = set()  # URLs that exhausted their budget in this run
         self.geo_service = GeolocationService(dbip_key, ipinfo_token)
         self.api_cache = APICache()
         self.endpoints_config = endpoints_config
@@ -1155,7 +1489,10 @@ class SolanaNetworkAnalyzer:
                 if cur != self.cluster: logger.debug(f"CLI cluster ({cur}) differs from --cluster ({self.cluster.upper()}); using --rpc-url override")
         except: pass
         rpc_note = f" (custom RPC)" if self.cluster_url not in CLUSTER_URLS.values() else ""
-        logger.info(f"💡 Cluster: {self.cluster} | RPC: {self.cluster_url}{rpc_note} | Run: {self.run_timestamp}")
+        chain = ""
+        if len(self.rpc_urls) > 1:
+            chain = f" (1/{len(self.rpc_urls)}, fallbacks: {', '.join(self.rpc_urls[1:])})"
+        logger.info(f"💡 Cluster: {self.cluster} | RPC: {self.cluster_url}{rpc_note}{chain} | Run: {self.run_timestamp}")
 
     def fetch_all_data(self):
         logger.info("="*60); logger.info(f"🚀 Solana {self.cluster.upper()} Network Analysis"); logger.info("="*60)
@@ -1190,9 +1527,38 @@ class SolanaNetworkAnalyzer:
         self._detect_co_hosted(); self._determine_version_status(); self._calculate_superminority()
         return True
 
+    def _rpc_cli(self, tail, desc, critical=False, timeout=RPC_TIMEOUT):
+        """Run `solana --url <active RPC> <tail>` (v3.9).
+
+        Non-critical calls behave exactly as before: bounded retries on the
+        active URL, None on failure. Critical calls get a wall-clock budget
+        per URL; when the active URL exhausts it, the next configured URL
+        that has not failed yet becomes the active one for the REST OF THIS
+        RUN (sticky failover), so validators, epoch, features and BLS all
+        come from the same node as gossip. When every URL is burned we
+        return None and the existing fetch_all_data() chain exits with
+        EXIT_CRITICAL; the next scheduled cycle starts again from primary.
+        """
+        if not critical:
+            return run_solana_cmd(["solana", "--url", self.cluster_url] + list(tail),
+                                  timeout=timeout, desc=desc)
+        budget = RPC_CRITICAL_BUDGET if len(self.rpc_urls) == 1 else RPC_URL_BUDGET
+        while True:
+            data = run_solana_cmd(["solana", "--url", self.cluster_url] + list(tail),
+                                  timeout=timeout, desc=desc, critical=True, budget=budget)
+            if data is not None:
+                return data
+            self._rpc_dead.add(self.cluster_url)
+            alive = [u for u in self.rpc_urls if u not in self._rpc_dead]
+            if not alive:
+                logger.error(f"❌ {desc}: all {len(self.rpc_urls)} RPC URLs failed in this run")
+                return None
+            logger.warning(f"🔁 RPC failover ({desc}): {self.cluster_url} -> {alive[0]}")
+            self.cluster_url = alive[0]
+
     def _fetch_gossip(self):
         logger.info("📡 Fetching gossip...")
-        data = run_solana_cmd(["solana","--url",self.cluster_url,"gossip","--output","json"], desc="gossip", critical=True)
+        data = self._rpc_cli(["gossip","--output","json"], desc="gossip", critical=True)
         if data is None: logger.error("❌ Gossip unavailable"); return False
         for e in data:
             ip = e.get("ipAddress")
@@ -1214,7 +1580,7 @@ class SolanaNetworkAnalyzer:
 
     def _fetch_validators(self):
         logger.info("🔍 Fetching validators...")
-        data = run_solana_cmd(["solana","--url",self.cluster_url,"validators","--output","json"], desc="validators", critical=True)
+        data = self._rpc_cli(["validators","--output","json"], desc="validators", critical=True)
         if data is None: logger.error("❌ Validators unavailable"); return False
         ts = data.get("totalActiveStake", 0)
         self.cluster_health = {
@@ -1228,12 +1594,15 @@ class SolanaNetworkAnalyzer:
         validators = data.get("validators", []); logger.info(f"✅ {len(validators)} validators")
         for val in validators:
             pk = val["identityPubkey"]; self.validator_data[pk] = val
+            commission = _parse_commission(val)
+            client_id = normalize_client_id(val.get("clientId"))  # v6.x: CLI 4.1.0+ clientId, Unknown(N) codes mapped to names
             found = False
             for rec in self.records:
                 if rec.identity_pubkey == pk:
                     found = True; rec.role = "validator"; rec.is_validator = True
-                    rec.vote_account = val.get("voteAccountPubkey"); rec.commission = val.get("commission")
+                    rec.vote_account = val.get("voteAccountPubkey"); rec.commission = commission
                     rec.epoch_credits = val.get("epochCredits")
+                    if client_id: rec.client_type = client_id
                     rec.activated_stake_lamports = val.get("activatedStake",0)
                     rec.delinquent = val.get("delinquent", False); rec.skip_rate = val.get("skipRate",0)
                     rec.version = val.get("version", rec.version)
@@ -1243,9 +1612,10 @@ class SolanaNetworkAnalyzer:
                 dl = val.get("delinquent", False)
                 off = NodeInfo(identity_pubkey=pk, role="validator-inactive" if dl else "validator-hidden",
                     is_validator=True, is_offline=True, delinquent=dl,
-                    vote_account=val.get("voteAccountPubkey"), commission=val.get("commission"),
+                    vote_account=val.get("voteAccountPubkey"), commission=commission,
                     epoch_credits=val.get("epochCredits"), activated_stake_lamports=val.get("activatedStake",0),
-                    skip_rate=val.get("skipRate",0), version=val.get("version"))
+                    skip_rate=val.get("skipRate",0), version=val.get("version"),
+                    client_type=client_id)
                 if ts>0: off.stake_percentage = off.activated_stake_lamports/ts*100
                 self.records.append(off)
         return True
@@ -1301,8 +1671,21 @@ class SolanaNetworkAnalyzer:
             for rec in self.records:
                 td = self.trillium_data.get(rec.identity_pubkey)
                 if td:
-                    if td.get("name"): rec.name = td["name"]
-                    rec.client_type = td.get("client_type")
+                    # Trillium returns a truncated vote_account (e.g. 'HZKop...BSpEc')
+                    # as a placeholder when a validator has no real name. Reject
+                    # those — keep name null so frontend handles it, rather than
+                    # showing a useless truncated key. (v6.x bugfix)
+                    td_name = td.get("name")
+                    if td_name and not is_truncated_pubkey(td_name, rec.vote_account, rec.identity_pubkey):
+                        rec.name = td_name
+                    # client_type comes from RPC clientId (Helius gives canonical
+                    # names like "HarmonicAgave"; official RPC gives "Unknown(N)"
+                    # which our normalizer maps to the same canonical). Only fall
+                    # back to Trillium if RPC didn't provide one — and normalize
+                    # Trillium's "Name (N)" format too, so client_type stays
+                    # canonical regardless of source.
+                    if not rec.client_type:
+                        rec.client_type = normalize_client_id(td.get("client_type"))
                     rec.mev_commission = td.get("mev_commission")
                     rec.is_sfdp = td.get("is_sfdp")
                     rec.sfdp_state = td.get("sfdp_state")
@@ -1955,7 +2338,7 @@ class SolanaNetworkAnalyzer:
 
     def _fetch_epoch(self):
         logger.info("📅 Fetching epoch...")
-        data = run_solana_cmd(["solana","--url",self.cluster_url,"epoch-info","--output","json"], desc="epoch", critical=True)
+        data = self._rpc_cli(["epoch-info","--output","json"], desc="epoch", critical=True)
         if data:
             self.current_epoch = data.get("epoch"); self.current_slot = data.get("absoluteSlot")
             si, se = data.get("slotIndex",0), data.get("slotsInEpoch",432000)
@@ -2275,17 +2658,12 @@ class SolanaNetworkAnalyzer:
                 geo.region = alt.get("region", "")
                 if alt.get("latitude") is not None: geo.latitude = alt["latitude"]
                 if alt.get("longitude") is not None: geo.longitude = alt["longitude"]
-                # Country name: derive from raw source or clear
-                raw_src = geo.sources.get(best_source)
-                if raw_src:
-                    if best_source == "ipinfo":
-                        geo.country = raw_src.get("country", geo.country_code)  # ipinfo only has CC
-                    elif best_source == "ipapi":
-                        geo.country = raw_src.get("country", geo.country_code)
-                    elif best_source == "geojs":
-                        geo.country = raw_src.get("name", geo.country_code)
-                else:
-                    geo.country = geo.country_code  # Fallback: use CC as name
+                # Country name + continent: derive from our mapping (works for
+                # all sources, since ipinfo/ipapi only give a 2-letter code and
+                # geojs gives a name we can ignore in favor of canonical mapping).
+                # (v6.x bugfix — previously ipinfo path stored the code as the name)
+                geo.country = country_name_from_code(geo.country_code)
+                geo.continent_code = continent_from_code(geo.country_code)
                 geo.primary_source = best_source
                 geo.confidence = "high"
 
@@ -2921,7 +3299,8 @@ def main():
     parser.add_argument("--ipinfo-token", default=os.getenv("IPINFO_TOKEN",""))
     parser.add_argument("--token", default=None, help="(deprecated)")
     parser.add_argument("--cluster", choices=["mainnet-beta","testnet","devnet","alpenglow-community"], default="mainnet-beta")
-    parser.add_argument("--rpc-url", default=None, help="Custom RPC URL (overrides cluster default)")
+    parser.add_argument("--rpc-url", action="append", default=None,
+                        help="RPC URL; repeat the flag to define a fallback chain (first = primary)")
     parser.add_argument("--endpoints", default="endpoints.yaml")
     parser.add_argument("--geo-overrides", default="geo_overrides.yaml", help="Geo overrides YAML (auto-generated from DZ + admin)")
     parser.add_argument("--export", action="store_true")

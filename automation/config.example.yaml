@@ -9,24 +9,40 @@
 #   # Run: python3 automation/run_sonda.py --config automation/config.yaml
 
 clusters:
+  # rpc_urls is an ordered fallback chain: the first entry is the primary RPC.
+  # Critical calls (gossip, validators, epoch-info) get 120s of retries per URL,
+  # then the analyzer moves to the next one for the rest of that cycle.
+  # Keep the chain short (2-3 URLs). The old single `rpc_url` key still works.
   mainnet-beta:
     interval: 60
-    rpc_url: https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+    rpc_urls:
+      - https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+      - https://api.mainnet-beta.solana.com
     enabled: true
   testnet:
     interval: 300
-    rpc_url: https://api.testnet.solana.com
+    rpc_urls:
+      - https://api.testnet.solana.com
+      # Your own testnet node on this host, if it runs with --full-rpc-api.
+      # getProgramAccounts may be slow there (no account index), so features
+      # can come back null while on this fallback; the snapshot stays valid.
+      - http://127.0.0.1:8899
     enabled: true
   devnet:
     interval: 300
-    rpc_url: https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+    rpc_urls:
+      - https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+      - https://api.devnet.solana.com
     enabled: true
-  # Alpenglow community cluster — experimental Solana network testing
-  # Alpenglow consensus algorithm. RPC should be a node you control
-  # (developer/community nodes can be flaky after regenesis events).
+  # Alpenglow community cluster: experimental network testing the Alpenglow
+  # consensus. Primary should be a node you control, started with
+  # --full-rpc-api (getClusterNodes is not part of the minimal RPC API).
   alpenglow-community:
     interval: 60
-    rpc_url: http://YOUR_ALPENGLOW_NODE_IP:8899
+    rpc_urls:
+      - http://YOUR_ALPENGLOW_NODE_IP:8899
+      - http://64.130.37.11:8899
+      - https://rpc.ag.validblocks.com
     enabled: true
 
 api_keys:

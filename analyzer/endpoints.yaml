@@ -134,10 +134,9 @@ solana:
   alpenglow-community:
     entrypoint:
       alpenglow-entrypoint-1: "64.130.37.11:8000"
-      alpenglow-entrypoint-2: "213.239.141.10:8001"
+      alpenglow-entrypoint-2: "213.239.141.16:8001"
       
     rpc:
       alpenglow-rpc-triton: "alpenglow.rpcpool.com:443"
       alpenglow-rpc-validblocks: "rpc.ag.validblocks.com:443"
-      alpenglow-rpc-ams: "rpc.ag-ams.validator1.net:443"
-      alpenglow-rpc-tyo: "rpc.ag-tyo.validator1.net:443"
+      alpenglow-rpc-ams: "rpc.ag.validator1.net"

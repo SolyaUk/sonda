@@ -41,7 +41,9 @@ def run_analyzer(cfg: dict, cluster: str, snapshot_path: Path) -> bool:
     geo_overrides = sonda_dir / "geo_overrides.yaml"
 
     cluster_cfg = cfg["clusters"][cluster]
-    rpc_url = cluster_cfg.get("rpc_url", "")
+    rpc_urls = cluster_cfg.get("rpc_urls") or ([cluster_cfg["rpc_url"]] if cluster_cfg.get("rpc_url") else [])
+    if isinstance(rpc_urls, str):
+        rpc_urls = [rpc_urls]
 
     cmd = [
         sys.executable, str(analyzer),
@@ -52,8 +54,8 @@ def run_analyzer(cfg: dict, cluster: str, snapshot_path: Path) -> bool:
         "--output", str(snapshot_path),
     ]
 
-    if rpc_url:
-        cmd += ["--rpc-url", rpc_url]
+    for url in rpc_urls:
+        cmd += ["--rpc-url", url]
     if endpoints.exists():
         cmd += ["--endpoints", str(endpoints)]
     if geo_overrides.exists():
