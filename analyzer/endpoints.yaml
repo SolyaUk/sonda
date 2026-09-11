@@ -34,7 +34,7 @@ jito:
       amsterdam: "74.118.140.240:1002"
       dublin: "64.130.61.8:1002"
       frankfurt: "64.130.50.14:1002"
-      london: "142.91.127.175:1002"
+      london: "64.130.46.153:1002"
       new-york: "141.98.216.96:1002"
       salt-lake-city: "64.130.53.8:1002"
       singapore: "202.8.11.224:1002"
@@ -61,8 +61,8 @@ jito:
       new-york: "64.130.35.224:1002"
 
     bam:
-      dallas: dallas.testnet.bam.jito.wtf
-      new-york: ny.testnet.bam.jito.wtf
+      dallas: dfw.testnet.bam.jito.wtf
+      new-york: ewr.testnet.bam.jito.wtf
       salt-lake-city: slc.testnet.bam.jito.wtf
 
 harmonic:

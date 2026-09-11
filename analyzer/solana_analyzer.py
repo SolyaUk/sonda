@@ -1,7 +1,24 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.10.1
+Solana Network Decentralization Analyzer v3.11.1
 ==============================================
+Changes from v3.11 (2026-09-10, hotfix):
+- version_status anchor rule: the top rank must hold >= 5% of the family,
+  so a lone experimental build no longer demotes the official release.
+- metrics.chain: finalized read before processed, lag floored at 0, delta
+  fallback (api_cache) when performance samples are empty.
+- client_id_raw also on hidden/inactive validators.
+
+Changes from v3.10.1 (2026-09-10):
+- ASN distributions keyed by ASN number + metrics.asn_names; canonical
+  asn_name in records (raw in asn_name_raw); provider level from
+  dc_overrides (provider_distribution, stake_by_provider, decentralization).
+- bam_region = IATA code from the BAM node name.
+- Client ids: 19785 = Mithril; other unknown codes = Unknown + client_id_raw
+  + metrics.client_unknown_codes.
+- version_status per client family, rank-based; small families -> null.
+- metrics.chain (slot time, TPS, finality lag) from JSON-RPC, non-critical.
+
 Changes from v3.10 (2026-09-04, hotfix):
 - BLS fetch load control: 2 workers, per-cycle cap, wall-clock budget,
   early stop on rate limiting. Missing keys are fetched over several cycles.
@@ -399,6 +416,8 @@ class GeolocationData:
     asn: str = "N/A"
     asn_name: str = "Unknown"
     asn_number: Optional[int] = None
+    asn_name_raw: Optional[str] = None  # v3.11: source name before canonicalization
+    provider: Optional[str] = None      # v3.11: company the node is rented from (dc_overrides), see _canonicalize_asn_names
     isp: str = ""
     continent_code: str = ""
     continent_name: str = ""
@@ -437,6 +456,7 @@ class NodeInfo:
     delinquent: bool = False
     skip_rate: Optional[float] = None
     client_type: Optional[str] = None
+    client_id_raw: Optional[str] = None  # v3.11: raw CLI clientId, e.g. "Unknown(19785)" or "JitoLabs"
     mev_commission: Optional[float] = None
     is_sfdp: Optional[bool] = None
     sfdp_state: Optional[str] = None
@@ -765,7 +785,11 @@ CLIENT_ID_BY_CODE = {
     11: "HarmonicFrankendancer",     # Trillium: "FD_Harmonic"
     12: "HarmonicFiredancer",        # rare, 1 seen on mainnet (2026-05)
     13: "Raiku",
+    19785: "Mithril",               # Overclock's client (Discord: Drt8...WskU runs mithril, version 0.0.0); 0x4D49 = ASCII "MI"
 }
+
+# v3.11: getRecentPerformanceSamples window for metrics.chain (1 sample = 60 s)
+CHAIN_PERF_SAMPLES = 1
 
 # Trillium "Name (N)" → SONDA canonical mapping. When Trillium is used as a
 # fallback (e.g. if RPC didn't provide clientId for a validator), strip the
@@ -838,7 +862,9 @@ def normalize_client_id(client_id):
     m = re.match(r"^Unknown\((\d+)\)$", client_id)
     if m:
         code = int(m.group(1))
-        return CLIENT_ID_BY_CODE.get(code, client_id)
+        # v3.11: unregistered codes are experimental/rotating builds; the raw
+        # code is kept on the record (client_id_raw), the canonical is Unknown
+        return CLIENT_ID_BY_CODE.get(code, "Unknown")
     # Trillium: "Harmonic (10)" → translate base name to canonical
     m = re.match(r"^(.+?)\s*\(\d+\)$", client_id)
     if m:
@@ -1394,6 +1420,24 @@ class GeolocationService:
 # GEO OVERRIDES
 # ========================================================================
 
+def load_dc_overrides(path):
+    """v3.11: dc_overrides.yaml -> {"AS20326": {...}, "AS29802_Haarlem": {...}}.
+    Default path is the file next to this script. Missing file = empty dict."""
+    p = Path(path) if path else Path(__file__).resolve().parent / "dc_overrides.yaml"
+    if not p.exists():
+        logger.info(f"  dc_overrides: {p} not found, canonical ASN names from raw data only")
+        return {}
+    try:
+        with open(p) as f:
+            data = yaml.safe_load(f) or {}
+        data = {k: v for k, v in data.items() if isinstance(k, str) and k.startswith("AS")}
+        logger.info(f"  dc_overrides: {len(data)} entries from {p}")
+        return data
+    except Exception as e:
+        logger.warning(f"⚠️  dc_overrides load failed ({e}); continuing without")
+        return {}
+
+
 def load_geo_overrides(path):
     """Load geo overrides from YAML. Returns dict {ip: override_entry}."""
     if not path or not os.path.exists(path): return {}
@@ -1476,7 +1520,7 @@ def load_endpoints(config_path, cluster):
 
 class SolanaNetworkAnalyzer:
     def __init__(self, dbip_key="", ipinfo_token="", cluster="mainnet-beta", endpoints_config="endpoints.yaml",
-                 rpc_url=None, geo_overrides_path=None):
+                 rpc_url=None, geo_overrides_path=None, dc_overrides_path=None):
         self.cluster = cluster
         # v3.9: rpc_url is a single URL or an ordered list (primary first).
         # self.cluster_url is the ACTIVE URL and is updated on failover, so
@@ -1490,6 +1534,10 @@ class SolanaNetworkAnalyzer:
         self.endpoints_config = endpoints_config
         self.geo_overrides_path = geo_overrides_path
         self.geo_overrides = {}
+        self.dc_overrides = load_dc_overrides(dc_overrides_path)  # v3.11
+        self.asn_names = {}                      # v3.11: {"AS20326": "TeraSwitch"}
+        self.chain = None                        # v3.11: metrics.chain
+        self.client_unknown_codes = defaultdict(list)  # v3.11: {19785: [identity, ...]}
         self.records: List[NodeInfo] = []
         self.all_ips: Set[str] = set()
         self.ip_to_records: Dict[str, List[NodeInfo]] = defaultdict(list)
@@ -1558,6 +1606,7 @@ class SolanaNetworkAnalyzer:
         self._check_endpoints_reachability()
         self._fetch_epoch()
         self._fetch_features()
+        self._fetch_chain_vitals()  # v3.11, non-critical
         # v3.10: BLS pubkeys on every cluster (VAT is active on mainnet and
         # testnet as well). Cached per vote account, see _fetch_bls_pubkeys.
         self._fetch_bls_pubkeys()
@@ -1567,6 +1616,7 @@ class SolanaNetworkAnalyzer:
         except PrimarySourceError as e:
             logger.warning(f"⚠️  DB-IP failed: {e}, secondary sources used")
         self._apply_geo_overrides()
+        self._canonicalize_asn_names()  # v3.11: one name per ASN, provider level
         self._detect_co_hosted(); self._determine_version_status(); self._calculate_superminority()
         return True
 
@@ -1639,6 +1689,10 @@ class SolanaNetworkAnalyzer:
             pk = val["identityPubkey"]; self.validator_data[pk] = val
             commission = _parse_commission(val)
             client_id = normalize_client_id(val.get("clientId"))  # v6.x: CLI 4.1.0+ clientId, Unknown(N) codes mapped to names
+            raw_cid = val.get("clientId")
+            um = re.match(r"^Unknown\((\d+)\)$", str(raw_cid or ""))
+            if um and int(um.group(1)) not in CLIENT_ID_BY_CODE:
+                self.client_unknown_codes[int(um.group(1))].append(pk)
             found = False
             for rec in self.records:
                 if rec.identity_pubkey == pk:
@@ -1646,6 +1700,7 @@ class SolanaNetworkAnalyzer:
                     rec.vote_account = val.get("voteAccountPubkey"); rec.commission = commission
                     rec.epoch_credits = val.get("epochCredits")
                     if client_id: rec.client_type = client_id
+                    rec.client_id_raw = raw_cid  # v3.11
                     rec.activated_stake_lamports = val.get("activatedStake",0)
                     rec.delinquent = val.get("delinquent", False); rec.skip_rate = val.get("skipRate",0)
                     rec.version = val.get("version", rec.version)
@@ -1658,7 +1713,7 @@ class SolanaNetworkAnalyzer:
                     vote_account=val.get("voteAccountPubkey"), commission=commission,
                     epoch_credits=val.get("epochCredits"), activated_stake_lamports=val.get("activatedStake",0),
                     skip_rate=val.get("skipRate",0), version=val.get("version"),
-                    client_type=client_id)
+                    client_type=client_id, client_id_raw=raw_cid)  # v3.11.1: raw code on offline validators too
                 if ts>0: off.stake_percentage = off.activated_stake_lamports/ts*100
                 self.records.append(off)
         return True
@@ -2133,7 +2188,12 @@ class SolanaNetworkAnalyzer:
                 # Find region from nodes API
                 for n in self.bam_nodes_api:
                     if n.get("bam_node") == rec.bam_node:
-                        rec.bam_region = n.get("region")
+                        # v3.11: the API's region now equals the node name;
+                        # derive the IATA code the same way endpoints do
+                        reg = str(n.get("region") or "")
+                        node = str(rec.bam_node or "")
+                        src = node if "-mainnet-" in node else reg
+                        rec.bam_region = src.split("-mainnet-")[0] if "-mainnet-" in src else (reg or None)
                         break
                 bam_applied += 1
             # IBRL scores (independent of BAM connection)
@@ -2397,6 +2457,115 @@ class SolanaNetworkAnalyzer:
             self.slots_in_epoch = se  # v6.3 — for activation_slot → epoch conversion in _fetch_features
             self.epoch_completed_percent = (si/se*100) if se else 0
             logger.info(f"✅ Epoch: {self.current_epoch}, Slot: {self.current_slot}, {self.epoch_completed_percent:.1f}%")
+
+    def _canonicalize_asn_names(self):
+        """v3.11: one display name per ASN for the whole run, plus provider.
+
+        Priority for the canonical name: dc_overrides.yaml display_name, else
+        the most frequent raw asn_name among this run's geo records for that
+        ASN (ties: DB-IP over the other sources). geo.asn_name is rewritten in
+        place (raw kept in geo.asn_name_raw) so distributions, decentralization,
+        IBRL by_asn, record export and the timeseries all see the same name.
+        geo.provider is the company the node is rented from, which can differ
+        from the network owner: dc_overrides "AS<n>_<city>" display_name, else
+        "AS<n>" display_name, else the canonical ASN name.
+        """
+        counts = defaultdict(Counter)
+        for g in self.geo_data.values():
+            if g.asn and g.asn != "N/A":
+                weight = 1.001 if (g.primary_source or "").lower().startswith("dbip") else 1.0
+                counts[g.asn][g.asn_name or "Unknown"] += weight
+        self.asn_names = {}
+        for asn, c in counts.items():
+            override = (self.dc_overrides.get(asn) or {}).get("display_name")
+            self.asn_names[asn] = override or c.most_common(1)[0][0]
+        overridden = 0
+        for g in self.geo_data.values():
+            if g.asn_name_raw is None:
+                g.asn_name_raw = g.asn_name
+            if g.asn and g.asn != "N/A":
+                g.asn_name = self.asn_names[g.asn]
+                city_ov = None
+                for city_key in (f"{g.asn}_{g.city}", f"{g.asn}_{normalize_city(g.city)}"):
+                    city_ov = (self.dc_overrides.get(city_key) or {}).get("display_name")
+                    if city_ov:
+                        break
+                g.provider = city_ov or g.asn_name
+                if city_ov:
+                    overridden += 1
+            else:
+                g.provider = g.asn_name or "Unknown"
+        from_dc = sum(1 for a in self.asn_names if (self.dc_overrides.get(a) or {}).get("display_name"))
+        logger.info(f"🏷️  ASN names: {len(self.asn_names)} ASNs, {from_dc} from dc_overrides, "
+                    f"{overridden} records with city-level provider override")
+
+    def _rpc_json(self, method, params=None, timeout=15):
+        """Single JSON-RPC call against the active RPC URL (v3.11)."""
+        r = requests.post(self.cluster_url,
+                          json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []},
+                          timeout=timeout)
+        r.raise_for_status()
+        j = r.json()
+        if "error" in j:
+            raise RuntimeError(f"{method}: {j['error']}")
+        return j.get("result")
+
+    def _fetch_chain_vitals(self):
+        """v3.11: metrics.chain for the homepage top cards (frontend note
+        2026-09-07b). Non-critical: any failure leaves self.chain = None and
+        the frontend shows "no data". finality_lag_slots is processed minus
+        finalized slot in the same cycle: ~32 on Tower BFT, ~1 on Alpenglow.
+        cu_per_block_avg stays null (would need getBlock per block, too heavy).
+        """
+        logger.info("⛓️  Fetching chain vitals...")
+        try:
+            # v3.11.1: finalized first, processed right after it. The chain moves
+            # between the two calls, so this order keeps the lag >= 0.
+            slot_f = self._rpc_json("getSlot", [{"commitment": "finalized"}])
+            slot_p = self._rpc_json("getSlot", [{"commitment": "processed"}])
+            slot_c = self._rpc_json("getSlot", [{"commitment": "confirmed"}])
+            height = self._rpc_json("getBlockHeight", [{"commitment": "confirmed"}])
+            samples = self._rpc_json("getRecentPerformanceSamples", [CHAIN_PERF_SAMPLES]) or []
+            n_slots = sum(int(s.get("numSlots") or 0) for s in samples)
+            secs = sum(int(s.get("samplePeriodSecs") or 0) for s in samples)
+            n_tx = sum(int(s.get("numTransactions") or 0) for s in samples)
+            nonvote_vals = [s.get("numNonVoteTransactions") for s in samples if s.get("numNonVoteTransactions") is not None]
+            slot_ms = (secs * 1000.0 / n_slots) if n_slots else None
+            lag = max(0, slot_p - slot_f) if (slot_p is not None and slot_f is not None) else None
+            source = "rpc"
+            tps = round(n_tx / secs, 1) if secs else None
+            if not secs:
+                # v3.11.1: no performance samples on this RPC (alpenglow node):
+                # derive slot time and total tps from deltas against the previous
+                # cycle (api_cache), tps_non_vote and tx_per_slot stay null.
+                tx_count = self._rpc_json("getTransactionCount", [{"commitment": "confirmed"}])
+                now = time.time()
+                prev = self.api_cache.get("chain_prev", self.cluster, 6 * 3600)
+                self.api_cache.set("chain_prev", self.cluster, {"ts": now, "slot": slot_c, "tx": tx_count})
+                secs = None; source = "delta"  # mode marker even on the first cycle (values null until next cycle)
+                if prev and slot_c and prev.get("slot") and slot_c > prev["slot"] and now > prev["ts"]:
+                    dt = now - prev["ts"]; dslot = slot_c - prev["slot"]
+                    slot_ms = dt * 1000.0 / dslot
+                    if tx_count is not None and prev.get("tx") is not None and tx_count >= prev["tx"]:
+                        tps = round((tx_count - prev["tx"]) / dt, 1)
+            self.chain = {
+                "slot": slot_c,
+                "block_height": height,
+                "window_s": secs or None,
+                "slot_time_ms": round(slot_ms, 1) if slot_ms else None,
+                "tps": tps,
+                "tps_non_vote": round(sum(int(v) for v in nonvote_vals) / secs, 1) if (secs and nonvote_vals) else None,
+                "tx_per_slot": round(n_tx / n_slots, 1) if n_slots else None,
+                "finality_lag_slots": lag,
+                "finality_ms": round(lag * slot_ms) if (lag is not None and slot_ms) else None,
+                "cu_per_block_avg": None,
+                "source": source,
+            }
+            logger.info(f"✅ Chain: slot {slot_c}, {self.chain['slot_time_ms']} ms/slot, "
+                        f"tps {self.chain['tps']}, finality lag {lag} slots")
+        except Exception as e:
+            logger.warning(f"⚠️  Chain vitals unavailable this cycle: {e}")
+            self.chain = None
 
     def _fetch_genesis_hash(self):
         """Fetch cluster genesis hash. Critical for rollback detection in timeseries.
@@ -2901,34 +3070,71 @@ class SolanaNetworkAnalyzer:
                 for o in others: o.role="co-hosted"; o.is_co_hosted=True; o.co_hosted_with=vpks; c+=1
         if c: logger.info(f"🔗 {c} co-hosted nodes")
 
-    def _determine_version_status(self):
-        fc = Counter(); fmax = {}
-        for r in self.records:
-            if r.is_validator and r.version:
-                fam = version_family(r.version)
-                if fam:
-                    fc[fam] += 1; vt = version_tuple(r.version)
-                    if fam not in fmax or vt > fmax[fam]: fmax[fam] = vt
-        if not fc: return
-        cons_fams = set(f for f,_ in fc.most_common(2))
-        def branch(fam): return "fd" if fam.startswith("0.") else "ag"
-        bmax = {}
-        for fam in cons_fams:
-            b = branch(fam)
-            if b not in bmax or fmax[fam] > bmax[b]: bmax[b] = fmax[fam]
-        for r in self.records:
-            fam = version_family(r.version)
-            if fam is None: r.version_status = None; continue
-            b = branch(fam); vt = version_tuple(r.version)
-            if fam in cons_fams: r.version_status = "current"
-            elif b in bmax and vt >= bmax[b]: r.version_status = "current"
-            else:
-                if b in bmax:
-                    mx = bmax[b]
-                    diff = (mx[1] if b=="fd" and len(mx)>1 else mx[0]) - (vt[1] if b=="fd" and len(vt)>1 else vt[0])
-                    r.version_status = "outdated" if diff <= 1 else "ancient"
-                else: r.version_status = "ancient"
+    # v3.11: version status is computed INSIDE a client family and by rank,
+    # never by arithmetic on version numbers, so a renumbering (Firedancer
+    # 0.6xx -> 1.1.3, FireBAM 0.1xx -> 26.08.2) simply becomes the top rank.
+    # Agave forks share Agave's numbering and form one family; every other
+    # canonical client is its own family.
+    VERSION_FAMILY_OF = {
+        "Agave": "agave-line", "Jito": "agave-line", "JitoBAM": "agave-line",
+        "HarmonicAgave": "agave-line", "HarmonicMajor": "agave-line",
+        "Rakurai": "agave-line", "Raiku": "agave-line",
+        "Frankendancer": "frankendancer", "HarmonicFrankendancer": "frankendancer",
+        "Firedancer": "firedancer", "HarmonicFiredancer": "firedancer",
+        "FireBAM": "firebam",
+    }
+    VERSION_FAMILY_MIN = 5        # smaller families get version_status null
+    VERSION_ROLLOUT_SHARE = 0.30  # next-lower (major, minor) is still "current" above this share
+    VERSION_ANCHOR_SHARE = 0.05   # v3.11.1: the top rank must hold at least this share of the family
 
+    @staticmethod
+    def _version_mm(ver):
+        """(major, minor) of a version string, or None when unparseable."""
+        if not ver or ver in ("unknown", "-"):
+            return None
+        parts = str(ver).lstrip("vV").split(".")
+        nums = []
+        for part in parts[:2]:
+            m = re.match(r"\d+", part)  # tolerate "3-beta", "0-rc1", "1xx" style parts
+            if not m:
+                return None
+            nums.append(int(m.group(0)))
+        return (nums[0], nums[1] if len(nums) > 1 else 0)
+
+    def _determine_version_status(self):
+        by_family = defaultdict(list)
+        for r in self.records:
+            if not r.is_validator:
+                continue
+            fam = self.VERSION_FAMILY_OF.get(r.client_type or "", r.client_type or "Unknown")
+            by_family[fam].append(r)
+        for fam, recs in by_family.items():
+            parsed = [(self._version_mm(r.version), r) for r in recs]
+            counts = Counter(mm for mm, _ in parsed if mm is not None)
+            population = sum(counts.values())
+            if fam == "Unknown" or population < self.VERSION_FAMILY_MIN:
+                for _, r in parsed:
+                    r.version_status = None
+                continue
+            ranked = sorted(counts.keys(), reverse=True)  # highest (major, minor) first
+            # v3.11.1: anchor = highest version with a real share; builds above
+            # it (MUC volunteers, experiments) are "current" too, never a yardstick
+            anchor = next((mm for mm in ranked if counts[mm] / population >= self.VERSION_ANCHOR_SHARE), ranked[0])
+            current = {mm for mm in ranked if mm >= anchor}
+            below = [mm for mm in ranked if mm < anchor]
+            if below and counts[below[0]] / population >= self.VERSION_ROLLOUT_SHARE:
+                current.add(below[0])
+            rest = [mm for mm in ranked if mm not in current]
+            outdated = {rest[0]} if rest else set()
+            for mm, r in parsed:
+                if mm is None:
+                    r.version_status = None
+                elif mm in current:
+                    r.version_status = "current"
+                elif mm in outdated:
+                    r.version_status = "outdated"
+                else:
+                    r.version_status = "ancient"
     def _calculate_superminority(self):
         vals = sorted([r for r in self.records if r.is_validator and r.stake_percentage is not None],
                       key=lambda r: r.stake_percentage, reverse=True)
@@ -3034,6 +3240,10 @@ class SolanaNetworkAnalyzer:
             "bam": self._bam_metrics(all_val),
             "rakurai": self._rakurai_metrics(all_val),
             "cluster_health": self.cluster_health,
+            # v3.11
+            "asn_names": self.asn_names,
+            "chain": self.chain,
+            "client_unknown_codes": {str(k): v for k, v in sorted(self.client_unknown_codes.items())},
         }
 
     def _bam_metrics(self, all_val):
@@ -3110,7 +3320,7 @@ class SolanaNetworkAnalyzer:
         for r in records:
             g = self.geo_data.get(r.ip_address)
             if g:
-                cc[g.country_code] += 1; ac[g.asn_name] += 1
+                cc[g.country_code] += 1; ac[g.asn] += 1  # v3.11: keyed by ASN number, names in metrics.asn_names
                 cic[f"{normalize_city(g.city)}, {g.country_code}"] += 1
         result = {
             "country_distribution": dict(cc.most_common()),
@@ -3148,23 +3358,25 @@ class SolanaNetworkAnalyzer:
 
         return {
             "by_country": _avg_group(lambda r: self.geo_data.get(r.ip_address, GeolocationData(ip="")).country_code),
-            "by_asn": _avg_group(lambda r: self.geo_data.get(r.ip_address, GeolocationData(ip="")).asn_name),
+            "by_asn": _avg_group(lambda r: self.geo_data.get(r.ip_address, GeolocationData(ip="")).asn),  # v3.11: ASN number keys
             "by_city": _avg_group(lambda r: f"{normalize_city(self.geo_data.get(r.ip_address, GeolocationData(ip='')).city)}, {self.geo_data.get(r.ip_address, GeolocationData(ip='')).country_code}"),
         }
 
     def _cat_metrics(self, records):
         m = {"total": len(records), "unique_ips": len(set(r.ip_address for r in records if r.ip_address))}
         if not records: return m
-        cc, ac, cic = Counter(), Counter(), Counter()
+        cc, ac, cic, pc = Counter(), Counter(), Counter(), Counter()
         for r in records:
             if r.ip_address:
                 g = self.geo_data.get(r.ip_address)
                 if g:
-                    cc[g.country_code] += 1; ac[g.asn_name] += 1
+                    cc[g.country_code] += 1; ac[g.asn] += 1  # v3.11: ASN number keys
                     cic[f"{normalize_city(g.city)}, {g.country_code}"] += 1
+                    pc[g.provider or g.asn_name] += 1
         m["country_distribution"] = dict(cc.most_common())
         m["asn_distribution"] = dict(ac.most_common())
         m["city_distribution"] = dict(cic.most_common())
+        m["provider_distribution"] = dict(pc.most_common())  # v3.11
         return m
 
     def _val_metrics(self, online, all_val):
@@ -3173,33 +3385,38 @@ class SolanaNetworkAnalyzer:
         m["hidden"] = len([r for r in all_val if r.role=="validator-hidden"])
         m["inactive"] = len([r for r in all_val if r.role=="validator-inactive"])
 
-        sc, sa, sci = defaultdict(float), defaultdict(float), defaultdict(float)
+        sc, sa, sci, spv = defaultdict(float), defaultdict(float), defaultdict(float), defaultdict(float)
         vs = []
         for r in all_val:
             sp = r.stake_percentage or 0; vs.append(sp)
             if r.ip_address:
                 g = self.geo_data.get(r.ip_address)
-                if g: sc[g.country_code]+=sp; sa[g.asn_name]+=sp; sci[f"{normalize_city(g.city)}, {g.country_code}"]+=sp
-            else: sc["OFFLINE"]+=sp; sa["OFFLINE"]+=sp; sci["OFFLINE"]+=sp
+                if g:
+                    # v3.11: stake_by_asn keyed by ASN number; provider = who the node is rented from
+                    sc[g.country_code]+=sp; sa[g.asn]+=sp; sci[f"{normalize_city(g.city)}, {g.country_code}"]+=sp
+                    spv[g.provider or g.asn_name]+=sp
+            else: sc["OFFLINE"]+=sp; sa["OFFLINE"]+=sp; sci["OFFLINE"]+=sp; spv["OFFLINE"]+=sp
 
         m["stake_by_country"] = dict(sorted(sc.items(), key=lambda x:x[1], reverse=True))
         m["stake_by_asn"] = dict(sorted(sa.items(), key=lambda x:x[1], reverse=True))
         m["stake_by_city"] = dict(sorted(sci.items(), key=lambda x:x[1], reverse=True))
+        m["stake_by_provider"] = dict(sorted(spv.items(), key=lambda x:x[1], reverse=True))  # v3.11
 
         cs, as_, cis, vss = list(sc.values()), list(sa.values()), list(sci.values()), [s for s in vs if s>0]
+        pvs = list(spv.values())  # v3.11: provider dimension
         m["decentralization"] = {"methodology": METRIC_METHODOLOGY, "current": {}}
         cur = m["decentralization"]["current"]
 
-        for l, sh in [("country",cs),("asn",as_),("city",cis),("validator",vss)]:
+        for l, sh in [("country",cs),("asn",as_),("provider",pvs),("city",cis),("validator",vss)]:
             n = calc_nakamoto(sh); cur[f"nakamoto_{l}"] = {"value":n, "rating":rate_nakamoto(n)}
         for thr in [33.33,50.0,66.67]:
             ti = int(thr)
-            for l, sh in [("country",cs),("asn",as_),("validator",vss)]:
+            for l, sh in [("country",cs),("asn",as_),("provider",pvs),("validator",vss)]:
                 cur[f"superminority_{l}_{ti}"] = {"value": calc_nakamoto(sh,thr)}
-        for l, sh in [("country",cs),("asn",as_),("validator",vss)]:
+        for l, sh in [("country",cs),("asn",as_),("provider",pvs),("validator",vss)]:
             h = calc_hhi(sh); cur[f"hhi_{l}"] = {"value":round(h,1), "rating":rate_hhi(h)}
         g = calc_gini(vs); cur["gini_validators"] = {"value":round(g,4), "rating":rate_gini(g)}
-        for l, sh in [("country",cs),("asn",as_),("validator",vss)]:
+        for l, sh in [("country",cs),("asn",as_),("provider",pvs),("validator",vss)]:
             h, hn = calc_shannon(sh); cur[f"shannon_{l}"] = {"entropy":round(h,4), "normalized":round(hn,4), "rating":rate_shannon(hn)}
         return m
 
@@ -3350,6 +3567,7 @@ class SolanaNetworkAnalyzer:
                 "city": geo.city, "region": geo.region,
                 "latitude": geo.latitude, "longitude": geo.longitude,
                 "asn": geo.asn, "asn_name": geo.asn_name, "asn_number": geo.asn_number,
+                "asn_name_raw": geo.asn_name_raw, "provider": geo.provider,  # v3.11
                 "isp": geo.isp, "continent_code": geo.continent_code,
                 "confidence": geo.confidence, "discrepancy": geo.discrepancy,
                 "discrepancy_details": geo.discrepancy_details,
@@ -3493,6 +3711,7 @@ def main():
                         help="RPC URL; repeat the flag to define a fallback chain (first = primary)")
     parser.add_argument("--endpoints", default="endpoints.yaml")
     parser.add_argument("--geo-overrides", default="geo_overrides.yaml", help="Geo overrides YAML (auto-generated from DZ + admin)")
+    parser.add_argument("--dc-overrides", default=None, help="dc_overrides.yaml (default: next to this script); provider names for ASNs")
     parser.add_argument("--export", action="store_true")
     parser.add_argument("--output", help="Output file")
     args = parser.parse_args()
@@ -3500,7 +3719,8 @@ def main():
     if not args.dbip_key: logger.warning("⚠️  No DB-IP key")
     a = SolanaNetworkAnalyzer(dbip_key=args.dbip_key, ipinfo_token=ipinfo, cluster=args.cluster,
                               endpoints_config=args.endpoints, rpc_url=args.rpc_url,
-                              geo_overrides_path=args.geo_overrides)
+                              geo_overrides_path=args.geo_overrides,
+                              dc_overrides_path=args.dc_overrides)
     if not a.fetch_all_data(): sys.exit(EXIT_CRITICAL)
     if args.export or args.output: a.export_data(output_file=args.output)
     else: a.print_full_report()
