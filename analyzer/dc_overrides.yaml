@@ -22,17 +22,25 @@
 #     url:         — full referral URL
 #     notes:       — internal notes about partnership
 #
-# Tag conventions (use sparingly, only with confirmed evidence):
+# Tag conventions (six tags, each with a way to verify it; no tag = a hosting
+# provider you can rent servers from, which is the norm and needs no mark):
 #   solana-focused   — provider has explicit Solana packages or community partnerships
-#                      Confirmed: Edgevana, Cherry Servers, Mevspace
-#   bare-metal       — physical hardware (the norm for Solana validators)
-#   cloud-only       — VPS/cloud only; warning, atypical for Solana
-#   banned           — provider doesn't allow Solana validators
+#                      (verify on the provider's site)
+#   DZ-partner       — integrated with DoubleZero (verify on DoubleZero's partner list)
+#   banned           — provider does not allow Solana validators (verify in their ToS)
 #                      Confirmed: Hetzner (since 2022)
-#   resold           — reselling another provider's infrastructure
-#   deprecated       — no longer recommended
-#   validator-funding — provider invests in Solana ecosystem
-#   DZ-partner       — integrated with DoubleZero
+#   isp              — residential or business internet access, i.e. the validator
+#                      runs at someone's home or office, not in a datacenter
+#                      (PeeringDB info_type "Cable/DSL/ISP", or an obvious ISP brand)
+#   transit          — carrier/backbone that owns the IP range but rents no servers;
+#                      the validator sits in an unknown datacenter behind it
+#                      (PeeringDB info_type "NSP": Cogent, Arelion, RETN, Hurricane Electric)
+#   private          — the ASN belongs to the validator operator, exchange or fund itself
+#                      (registry organisation = the validator's own name)
+#
+# Retired 2026-09-11: bare-metal (all Solana validators are), cloud-only (false for
+# the hyperscalers' bare-metal offers), resold (modelled by ASN_city entries),
+# deprecated, validator-funding, network-provider (split into isp and transit).
 #
 # Initial fill is best-effort based on public information. Marked with "# ?"
 # where uncertain — please verify and edit.
@@ -47,7 +55,7 @@
 # TeraSwitch — major Solana-friendly provider, bare-metal in multiple regions
 # Validators: 160 | Stake: 137% (sum across 4 clusters)
 "AS20326":
-  display_name: "Teraswitch"
+  display_name: "TeraSwitch"
   website: "https://teraswitch.com/bare-metal"
   incidents: "https://www.teraswitchstatus.com"
   tags: ["DZ-partner"]
@@ -278,7 +286,7 @@
 # AS-GLXY-DIGITAL — Galaxy Digital (institutional crypto firm)
 # Validators: 5 | Stake: 3%
 "AS400963":
-  display_name: "Galaxy Digital LP"
+  display_name: "Galaxy Digital"
   website: "https://www.galaxy.com"
   tags: ["private"]
   notes: "Galaxy runs its own infrastructure"
@@ -306,6 +314,7 @@
 "AS9002":
   display_name: "RETN"
   website: "https://retn.net"
+  tags: ["transit"]
 
 # Amazon AWS (commercial)
 # Validators: 9 | Stake: 3%
@@ -336,7 +345,7 @@
 # Google
 # Validators: 3 | Stake: 2%
 "AS15169":
-  display_name: "Google LLC"
+  display_name: "Google"
   website: "https://cloud.google.com"
 
 # Hetzner — banned for Solana validators since 2022
@@ -426,6 +435,7 @@
 "AS174":
   display_name: "Cogent"
   website: "https://www.cogentco.com"
+  tags: ["transit"]
 
 # netcup — German VPS/dedicated provider (Nürnberg)
 # Validators: 2 | Stake: 0.87%
@@ -459,6 +469,7 @@
 "AS6939":
   display_name: "Hurricane Electric"
   website: "https://he.net"
+  tags: ["transit"]
 
 # Butterfly Research
 # Validators: 7 | Stake: 0.53%
@@ -468,7 +479,7 @@
 # Google (YouTube ASN) — same as Google Cloud essentially
 # Validators: 1 | Stake: 0.33%
 "AS43515":
-  display_name: "Google LLC"
+  display_name: "Google"
   website: "https://cloud.google.com"
 
 # VNET — Slovak hosting provider (Bratislava)
@@ -626,76 +637,76 @@
   display_name: "Hyperoptic"
   website: "https://www.hyperoptic.com"
   incidents: "https://www.hyperoptic.com/network-status"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # Avantel — Russian regional provider (Samara)
 # Validators: 1 | Stake: 1.31%
 "AS197235":
   display_name: "Avantel"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # Fusix Networks — NL network/hosting provider
 # Validators: 2 | Stake: 1.13%
 "AS57866":
   display_name: "Fusix"
   website: "https://fusix.nl"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # Orange España — Spanish telecom (Madrid)
 # Validators: 1 | Stake: 1.07%
 "AS12479":
   display_name: "Orange España"
   website: "https://www.orange.es"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # Freedom Internet — Dutch ISP
 # Validators: 1 | Stake: 1.07%
 "AS206238":
   display_name: "Freedom Internet"
   website: "https://www.freedom.nl"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # Cablevision (Optimum/Altice USA) — US residential ISP
 # Validators: 1 | Stake: 1.07%
 "AS6128":
   display_name: "Optimum"
   website: "https://www.optimum.net"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # SkyNet
 # Validators: 1 | Stake: 0.38%
 "AS35807":
   display_name: "SkyNet"
   website: "https://www.skynet.ru"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # SK Broadband — Korean telecom (Seoul)
 # Validators: 3 | Stake: 0.20%
 "AS9318":
   display_name: "SK Broadband"
   website: "https://www.bworld.co.kr"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # Vorboss — UK business ISP (London)
 # Validators: 4 | Stake: 0.18%
 "AS25160":
   display_name: "Vorboss"
   website: "https://vorboss.com"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # inter.link — German network/connectivity provider (Berlin)
 # Validators: 2 | Stake: 0.12%
 "AS5405":
   display_name: "inter.link"
   website: "https://inter.link"
-  tags: ["network-provider"]
+  tags: ["transit"]
 
 # Lovitel (LEALTA-AS)
 # Validators: 3 | Stake: 0.10%
 "AS41275":
   display_name: "Lovitel"
   website: "https://lovit.ru"
-  tags: ["network-provider"]
+  tags: ["isp"]
 
 # Evolus IT Solutions — AT/DE hosting
 # Validators: 2 | Stake: 0.09%
@@ -703,7 +714,388 @@
   display_name: "Evolus"
   website: "https://evolusfibre.com"
   incidents: "https://evolusfibre.com/servicestatus"
-  tags: ["network-provider"]
+  tags: ["isp"]
+
+# ----------------------------------------------------------------------------
+# Added 2026-09-11: ASNs seen by SONDA but missing from this file (55).
+# Verification key in the comment above each entry:
+#   [both]    ChatGPT (browsing) and Gemini agree on brand and website
+#   [opened]  ChatGPT opened the company page; Gemini disagreed or guessed
+#   [known]   backend line knows the brand; open the site once
+# Class is expressed by tags only: isp / transit / private; no tag = hosting.
+# ----------------------------------------------------------------------------
+
+# Arelion (ex Telia Carrier), backbone network Twelve99. Transit, not a datacenter. [known]
+# Validators: 3 | Stake: 0.21%
+"AS1299":
+  display_name: "Arelion"
+  website: "https://www.arelion.com"
+  tags: ["transit"]
+
+# Momentum (gomomentum.com), wholesale connectivity; same company on AS32209 and AS25645. [opened]
+# Validators: 1 | Stake: 0.18%
+"AS32209":
+  display_name: "Momentum"
+  website: "https://gomomentum.com"
+  incidents: "https://momentumwholesale.status.page"
+  tags: ["transit"]
+  notes: "PeeringDB NSP; Gemini named it 'Momentum Access' with an unverified domain"
+
+# Retsina Software (registry: Retsina Technologies LTD., Canada). Validator operator (SolGuardian)
+# with a Shredstream PoP co-located in TeraSwitch Frankfurt; own ASN. [verified by Viktor 2026-09-12]
+# Validators: 1 | Stake: 0.08%
+"AS33487":
+  display_name: "Retsina Software"
+  website: "https://retsinasoftware.com"
+  tags: ["private"]
+  notes: "operator site (SolGuardian validator, Shredstream service); PoP physically in TeraSwitch Frankfurt; ipinfo ASN type Hosting"
+
+# Comvive, Spanish hosting (comvive.es). [known] ChatGPT got 403 on the site, Gemini agrees on the domain.
+# Validators: 1 | Stake: 0.07%
+"AS39020":
+  display_name: "Comvive"
+  website: "https://www.comvive.es"
+
+# PriorityColo, Toronto colocation and hosting. [both] (forum.prioritycolo.com is a forum, not a status page)
+# Validators: 1 | Stake: 0.06%
+"AS30176":
+  display_name: "PriorityColo"
+  website: "https://www.prioritycolo.com"
+
+# Asimo Networks, Dutch business internet and datacenter connectivity. [opened] Gemini guessed a .ro domain.
+# Validators: 1 | Stake: 0.05%
+"AS49127":
+  display_name: "Asimo Networks"
+  website: "https://www.asimonetworks.com"
+  tags: ["isp"]
+
+# Pulsant, UK datacenter operator. [known]
+# Validators: 1 | Stake: 0.05%
+"AS12703":
+  display_name: "Pulsant"
+  website: "https://www.pulsant.com"
+
+# A2B Internet, Dutch IP transit / wholesale connectivity. [both]
+# Validators: 1 | Stake: 0.05%
+"AS51088":
+  display_name: "A2B Internet"
+  website: "https://www.a2b-internet.com"
+  tags: ["transit"]
+
+# FDCservers, Chicago dedicated hosting. [known]
+# Validators: 1 | Stake: 0.04%
+"AS30058":
+  display_name: "FDCservers"
+  website: "https://www.fdcservers.net"
+
+# Türk Telekom International (registry still TTI-NET, ex Euroweb). Backbone/transit. [opened, site timed out]
+# Validators: 1 | Stake: 0.04%
+"AS6663":
+  display_name: "Türk Telekom International"
+  website: "https://turktelekomint.com"
+  tags: ["transit"]
+  notes: "site timed out for ChatGPT; Gemini's teletime.net looks unrelated"
+
+# Momentum, second ASN (registry MOMENTUM-ACCESS). [opened]
+# Validators: 1 | Stake: 0.04%
+"AS25645":
+  display_name: "Momentum"
+  website: "https://gomomentum.com"
+  incidents: "https://momentumwholesale.status.page"
+  tags: ["transit"]
+
+# Netorn, Russian regional ISP (internet, TV, telephony, some hosting). [both on domain] PeeringDB Cable/DSL/ISP.
+# Validators: 1 | Stake: 0.03%
+"AS34123":
+  display_name: "Netorn"
+  website: "https://netorn.ru"
+  tags: ["isp"]
+
+# VERSIJA (SIA VERSIJA, vernet.lv), Latvian business ISP; registry says UNSPECIFIED. Same company as AS203866. [opened]
+# Validators: 1 | Stake: 0.03%
+"AS8285":
+  display_name: "VERSIJA"
+  website: "https://www.vernet.lv"
+  tags: ["isp"]
+
+# United DC, the hosting arm of United Networks of Ukraine Ltd (RIPE holder; PeeringDB site uniteddc.net.ua,
+# type Cable/DSL/ISP for the ISP business). Dedicated servers and VPS sold directly. [registry-verified 2026-09-12]
+# Validators: 1 | Stake: 0.03%
+"AS24703":
+  display_name: "United DC"
+  website: "https://uniteddc.net.ua"
+  notes: "holder United Networks of Ukraine Ltd; PeeringDB info_type Cable/DSL/ISP (ISP arm), the DC arm rents servers; UNTC (untc.ua) is a different company"
+
+# HostSlim, Dutch hosting. [both]
+# Validators: 1 | Stake: 0.02%
+"AS207083":
+  display_name: "HostSlim"
+  website: "https://www.hostslim.nl"
+  incidents: "https://status.hostslim.nl"
+
+# ELSOUL LABO, Solana infrastructure company (Solv), Netherlands; own ASN. [known]
+# Validators: 1 | Stake: 0.02%
+"AS200261":
+  display_name: "ELSOUL LABO"
+  website: "https://elsoul.nl"
+  tags: ["solana-focused", "private"]
+
+# Cosmonova, Kyiv datacenter and ISP. [known]
+# Validators: 1 | Stake: 0.02%
+"AS34867":
+  display_name: "Cosmonova"
+  website: "https://cosmonova.net"
+
+# Server.ua, Ukrainian hosting. [known]
+# Validators: 1 | Stake: 0.02%
+"AS3236":
+  display_name: "Server.ua"
+  website: "https://server.ua"
+
+# NetInch, network and hosting solutions. [both]
+# Validators: 2 | Stake: 0.01%
+"AS60414":
+  display_name: "NetInch"
+  website: "https://www.netinch.com"
+
+# Coloblox, Atlanta datacenter (colocation, connectivity). [both on domain] Status page from ChatGPT, open once.
+# Validators: 1 | Stake: 0.01%
+"AS6597":
+  display_name: "Coloblox"
+  website: "https://coloblox.com"
+  incidents: "https://status.coloblox.com"
+
+# InterServer, second ASN (registry Interserver, Inc). Same provider as AS19318. [known]
+# Validators: 1 (+1 alpenglow) | Stake: 0.01%
+"AS26666":
+  display_name: "InterServer"
+  website: "https://www.interserver.net"
+  incidents: "https://interserver.statuspage.io"
+
+# Cloudize, Australian infrastructure operator. [opened] Gemini guessed a .com.au domain.
+# Validators: 1 | Stake: 0.01%
+"AS154126":
+  display_name: "Cloudize"
+  website: "https://cloudize.com"
+
+# Hvosting, Ukrainian hosting (registry: PE Konstantin Vladimirovich Kravchenko). [verified by Viktor 2026-09-12]
+# Validators: 1 | Stake: 0.01%
+"AS43773":
+  display_name: "Hvosting"
+  website: "https://hvosting.ua"
+
+# HostCircle, Dutch colocation and bare metal. [opened] Gemini guessed a .com domain.
+# Validators: 1 | Stake: 0.01%
+"AS56504":
+  display_name: "HostCircle"
+  website: "https://www.hostcircle.nl"
+  incidents: "https://www.hostcircle.nl/portal/serverstatus.php"
+
+# VERSIJA, second ASN (registry DC-P2). [opened] Gemini invented dc-p2.com.
+# Validators: 1 | Stake: 0.00%
+"AS203866":
+  display_name: "VERSIJA"
+  website: "https://www.vernet.lv"
+  tags: ["isp"]
+
+# 365 Data Centers (registry BROADBANDONE, acquired). [both]
+# Validators: 1 | Stake: 0.00%
+"AS13645":
+  display_name: "365 Data Centers"
+  website: "https://365datacenters.com"
+
+# Spectrum (Charter Communications, ex Time Warner Cable), US residential/business ISP. [known]
+# Validators: 1 | Stake: 0.00%
+"AS10796":
+  display_name: "Spectrum"
+  website: "https://www.spectrum.com"
+  tags: ["isp"]
+
+# Fountainhead Technologies, Hong Kong (ipinfo: ASN type Hosting, site fountainhead.network). Site dead as of 2026-09. [verified by Viktor 2026-09-12]
+# Validators: 3 testnet | Stake: 0.16% testnet
+"AS207075":
+  display_name: "Fountainhead Technologies"
+  website: null
+  notes: "registry site fountainhead.network is dead (2026-09); ipinfo ASN type Hosting, Hong Kong; Gemini's fountainhead.tech is unverified"
+
+# LightSpeed Hosting, US cloud and dedicated servers. [both]
+# Validators: 1 testnet, 1 alpenglow
+"AS395723":
+  display_name: "LightSpeed Hosting"
+  website: "https://www.lightspeedhosting.com"
+
+# Ikoula, French hosting (registry Ikoula Net SAS). [known]
+# Validators: 2 alpenglow
+"AS21409":
+  display_name: "Ikoula"
+  website: "https://www.ikoula.com"
+
+# LuxLite, Ukrainian home ISP. [opened] Gemini guessed a .net domain.
+# Validators: 2 testnet
+"AS210421":
+  display_name: "LuxLite"
+  website: "https://luxlite.ua"
+  tags: ["isp"]
+
+# Enlink, London business internet for offices and datacentres. [opened] Gemini guessed a .si domain.
+# Validators: 1 testnet | RPC: 1 mainnet
+"AS51945":
+  display_name: "Enlink"
+  website: "https://en.link"
+  tags: ["isp"]
+
+# DartPoints (registry DP-BTR, Baton Rouge), US datacenters and cloud. [opened] Gemini answered "DuPont", wrong.
+# Validators: 1 testnet
+"AS20355":
+  display_name: "DartPoints"
+  website: "https://dartpoints.com"
+
+# Enzu, US hosting. [known]
+# Validators: 1 testnet
+"AS18978":
+  display_name: "Enzu"
+  website: "https://www.enzu.com"
+
+# Odido (ex T-Mobile Netherlands), Dutch ISP. [known]
+# Validators: 1 testnet
+"AS50266":
+  display_name: "Odido"
+  website: "https://www.odido.nl"
+  tags: ["isp"]
+
+# Fibertown (registry FDL-42), Texas colocation datacenter. [opened] Gemini answered "Fond du Lac", wrong.
+# Validators: 1 testnet
+"AS19366":
+  display_name: "Fibertown"
+  website: "https://fibertown.com"
+
+# AT&T, US ISP. [known]
+# Validators: 1 testnet
+"AS7018":
+  display_name: "AT&T"
+  website: "https://www.att.com"
+  tags: ["isp"]
+
+# Astute Internet (registry ASTUTEHOSTING-VALUE), Canadian hosting; astutehosting.com now redirects here. [verified by Viktor 2026-09-12]
+# Validators: 1 testnet
+"AS63213":
+  display_name: "Astute Internet"
+  website: "https://www.astuteinternet.com"
+  incidents: "https://status.astuteinternet.com"
+
+# S3RDV LLC (registry SOUTH 3RD VENTURES), Solana validator and DoubleZero infrastructure operator; own ASN. [opened]
+# Validators: 1 testnet
+"AS397978":
+  display_name: "S3RDV"
+  website: "https://s3rdv.com"
+  tags: ["private"]
+
+# RETN, second ASN (RETN-LV, Latvia). Same provider as AS9002. [known]
+# Validators: 1 testnet
+"AS28886":
+  display_name: "RETN"
+  website: "https://www.retn.net"
+  tags: ["transit"]
+
+# Maxnet, Kharkiv ISP. [known]
+# Validators: 1 testnet
+"AS34700":
+  display_name: "Maxnet"
+  website: "https://maxnet.ua"
+  tags: ["isp"]
+
+# Metrocom (registry Comunicaciones Metropolitanas), Panama ISP, part of Cable Color. [opened]
+# Validators: 1 testnet
+"AS269864":
+  display_name: "Metrocom"
+  website: "https://www.metrocom.com.pa"
+  tags: ["isp"]
+
+# Teleport Telecom (registry CO-2COM until 2026-04; holder changed), Russian ISP. [opened, site timed out]
+# Validators: 1 testnet
+"AS8334":
+  display_name: "Teleport Telecom"
+  website: null
+  tags: ["isp"]
+  notes: "ASN holder changed from 2COM to JSC Teleport Telecom on 2026-04-29 (bgp.he.net)"
+
+# Serverius, Dutch datacenter operator. [known]
+# Validators: 1 testnet
+"AS50673":
+  display_name: "Serverius"
+  website: "https://serverius.net"
+
+# HorizonIQ (ex SingleHop, ex INAP), US hosting. [opened] SingleHop is no longer a brand.
+# RPC: 4 mainnet, 2 devnet
+"AS32475":
+  display_name: "HorizonIQ"
+  website: "https://www.horizoniq.com"
+
+# LMAX Digital, exchange running its own infrastructure. [known]
+# RPC: 2 mainnet
+"AS39498":
+  display_name: "LMAX Digital"
+  website: "https://www.lmaxdigital.com"
+  tags: ["private"]
+
+# Equinix, global datacenter operator. [known]
+# RPC: 1 mainnet
+"AS15830":
+  display_name: "Equinix"
+  website: "https://www.equinix.com"
+
+# Tencent Cloud. [known]
+# RPC: 1 mainnet
+"AS132203":
+  display_name: "Tencent Cloud"
+  website: "https://www.tencentcloud.com"
+
+# Contabo, second ASN. Same provider as AS51167. [known]
+# RPC: 1 mainnet
+"AS40021":
+  display_name: "Contabo"
+  website: "https://contabo.com"
+  incidents: "https://contabo-status.com"
+
+# Leaseweb, German ASN. Same provider as AS60781 and AS59253. [known]
+# RPC: 1 mainnet
+"AS28753":
+  display_name: "Leaseweb"
+  website: "https://www.leaseweb.com"
+  incidents: "https://www.leasewebstatus.com"
+
+# active-servers, German dedicated and vServer hosting (brand written in lowercase). [opened] Gemini guessed a .ru domain.
+# RPC: 1 mainnet
+"AS197071":
+  display_name: "active-servers"
+  website: "https://active-servers.com"
+
+# HOTnet, Israeli cable ISP HOT. [both]
+# RPC: 1 mainnet
+"AS12849":
+  display_name: "HOTnet"
+  website: "https://www.hot.net.il"
+  tags: ["isp"]
+
+# IP House, London datacenter, dedicated servers. [opened] Gemini guessed iphouse.net.
+# RPC: 1 mainnet
+"AS211091":
+  display_name: "IP House"
+  website: "https://www.ip-house.co.uk"
+
+# Samsung SDS. [known]
+# RPC: 1 devnet
+"AS45985":
+  display_name: "Samsung SDS"
+  website: "https://www.samsungsds.com"
+
+# Far EasTone (registry Asia Pacific Broadband Fixed Lines / APBT, merged into FET), Taiwanese mobile and fixed-line operator. [verified by Viktor 2026-09-12]
+# RPC: 1 devnet
+"AS24154":
+  display_name: "Far EasTone"
+  website: "https://www.fetnet.net"
+  tags: ["isp"]
+
 
 # ============================================================================
 # ASN_CITY-LEVEL OVERRIDES (specific DC location, overrides ASN-level)
