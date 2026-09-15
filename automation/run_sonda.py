@@ -616,6 +616,23 @@ class Maintenance:
             except Exception as e:
                 logger.warning(f"prune failed: {e}")
 
+        # v6.9.1: weekly datacenter logo refresh (dc_logos.py), Sunday after
+        # PRUNE_HOUR, non-critical. Logos land on R2 under assets/dc/.
+        if (now.weekday() == 6 and now.hour >= PRUNE_HOUR
+                and self.state.get("last_logos_date") != today):
+            try:
+                paths = self.config.get("paths") or {}
+                script = Path(paths["automation_dir"]) / "dc_logos.py"
+                if script.exists():
+                    r = subprocess.run([sys.executable, str(script), "--config", self.config["_config_path"]],
+                                       capture_output=True, timeout=900, text=True)
+                    tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+                    logger.info(f"🖼  dc_logos rc={r.returncode}: {tail[0][:200]}")
+                self.state["last_logos_date"] = today
+                self._save_state()
+            except Exception as e:
+                logger.warning(f"dc_logos failed: {e}")
+
         # Hourly WAL checkpoint (prevent WAL file from growing indefinitely)
         if time.monotonic() - self.last_wal_checkpoint > WAL_CHECKPOINT_INTERVAL:
             try:
@@ -658,15 +675,21 @@ class Maintenance:
             paths = self.config.get("paths") or {}
             upload_script = Path(paths["automation_dir"]) / "r2_upload.py"
             if upload_script.exists():
-                key = f"backups/{Path(backup_path).name}"
-                subprocess.run(
-                    [sys.executable, str(upload_script),
-                     "--config", self.config["_config_path"],
-                     "--file", str(backup_path),
-                     "--key", key],
-                    capture_output=True, timeout=120, text=True,
-                )
-                logger.info(f"☁️  backup uploaded to R2: {key}")
+                # v6.9.1: daily copies under backups/daily/ (R2 lifecycle rule
+                # deletes them after 30 days), Sunday copies also under
+                # backups/weekly/ which are kept forever.
+                keys = [f"backups/daily/{Path(backup_path).name}"]
+                if datetime.now(timezone.utc).weekday() == 6:
+                    keys.append(f"backups/weekly/{Path(backup_path).name}")
+                for key in keys:
+                    subprocess.run(
+                        [sys.executable, str(upload_script),
+                         "--config", self.config["_config_path"],
+                         "--file", str(backup_path),
+                         "--key", key],
+                        capture_output=True, timeout=120, text=True,
+                    )
+                    logger.info(f"☁️  backup uploaded to R2: {key}")
         except Exception as e:
             logger.debug(f"backup R2 upload skipped: {e}")
 

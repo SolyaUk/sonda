@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.11.1
+Solana Network Decentralization Analyzer v3.12
 ==============================================
+Changes from v3.11.1 (2026-09-13):
+- Client id registry aligned with agave version/src/client_ids.rs: 7=Sig,
+  9=HarmonicFiredancer, 12=FireBAM, 4=Paladin; the label HarmonicMajor is gone
+  (it was code 9 = HarmonicFiredancer). HarmonicFiredancer is its own version
+  family (Firedancer year.month numbering, 26.x).
+- client_id_raw exported on every record (was set but never written).
+- Entrypoint checks use the port from endpoints.yaml (8000 on Alpenglow).
+- metrics.providers from dc_overrides (asns, tags, website, incidents, logo).
+- metrics.chain: cluster status from every configured RPC (live / degraded /
+  halted / unknown), halted_since, stake_in_gossip_pct, stale_rpcs.
+
 Changes from v3.11 (2026-09-10, hotfix):
 - version_status anchor rule: the top rank must hold >= 5% of the family,
   so a lone experimental build no longer demotes the official release.
@@ -508,6 +519,7 @@ class NodeInfo:
     endpoint_port: Optional[int] = None
     endpoint_reachable: Optional[bool] = None
     endpoint_bam_id: Optional[str] = None  # for BAM API mapping
+    endpoint_check: Optional[str] = None   # v3.12: per-entry check method from endpoints.yaml, e.g. "tcp:50055"
     _ep_source: str = ""  # transient, not exported
 
 
@@ -772,24 +784,30 @@ def truncate_id(s, n=13):
 # Unknown(N) counts and Trillium "Name (N)" counts on mainnet (2026-05) —
 # all three sources matched per code.
 CLIENT_ID_BY_CODE = {
-    0:  "Agave",
-    1:  "Jito",
+    # v3.12: aligned with agave version/src/client_ids.rs (primary source).
+    # CLI 4.2.x knows names for 0..7 only; 8..13 arrive as Unknown(N) and are mapped here.
+    0:  "Agave",                     # SolanaLabs (legacy client, Agave lineage)
+    1:  "Jito",                      # JitoLabs
     2:  "Frankendancer",
     3:  "Agave",
+    4:  "Paladin",                   # AgavePaladin
     5:  "Firedancer",
-    6:  "JitoBAM",                   # Jito client running with --bam-url; Helius/CLI: "AgaveBam"; Trillium: "Jito_BAM"
-    7:  "FireBAM",                   # Firedancer-compatible BAM (Jito); rare, 1 seen on mainnet (2026-05)
+    6:  "JitoBAM",                   # AgaveBam: Jito client running with --bam-url; Trillium: "Jito_BAM"
+    7:  "Sig",                       # Syndica's Zig client
     8:  "Rakurai",
-    9:  "HarmonicMajor",             # Trillium: "Harmonic_Major" — kept without underscore for consistency
+    9:  "HarmonicFiredancer",        # Harmonic's Firedancer build (26.x); Trillium: "Harmonic_Major"; SONDA called it HarmonicMajor before v3.12
     10: "HarmonicAgave",             # Trillium: "Harmonic"
     11: "HarmonicFrankendancer",     # Trillium: "FD_Harmonic"
-    12: "HarmonicFiredancer",        # rare, 1 seen on mainnet (2026-05)
+    12: "FireBAM",                   # Jito's Firedancer+BAM client; SONDA called it HarmonicFiredancer before v3.12
     13: "Raiku",
     19785: "Mithril",               # Overclock's client (Discord: Drt8...WskU runs mithril, version 0.0.0); 0x4D49 = ASCII "MI"
 }
 
 # v3.11: getRecentPerformanceSamples window for metrics.chain (1 sample = 60 s)
 CHAIN_PERF_SAMPLES = 1
+# v3.12: cluster status thresholds (metrics.chain.status)
+CHAIN_DEGRADED_DELINQUENT_PCT = 33.4   # a third of stake delinquent: no supermajority for finality
+CHAIN_DEGRADED_LAG_SLOTS = 1000        # processed minus finalized; ~32 on Tower, ~1 on Alpenglow
 
 # Trillium "Name (N)" → SONDA canonical mapping. When Trillium is used as a
 # fallback (e.g. if RPC didn't provide clientId for a validator), strip the
@@ -801,7 +819,7 @@ TRILLIUM_TO_CANONICAL = {
     "Firedancer":       "Firedancer",
     "Jito_BAM":         "JitoBAM",
     "Rakurai":          "Rakurai",
-    "Harmonic_Major":   "HarmonicMajor",
+    "Harmonic_Major":   "HarmonicFiredancer",  # v3.12: registry code 9
     "Harmonic":         "HarmonicAgave",
     "FD_Harmonic":      "HarmonicFrankendancer",
     "Raiku":            "Raiku",
@@ -822,7 +840,10 @@ HELIUS_TO_CANONICAL = {
     "HarmonicAgave":          "HarmonicAgave",
     "HarmonicFrankendancer":  "HarmonicFrankendancer",
     "HarmonicFiredancer":     "HarmonicFiredancer",
-    "HarmonicMajor":          "HarmonicMajor",
+    "HarmonicMajor":          "HarmonicFiredancer",     # v3.12: legacy SONDA label, registry code 9
+    "Sig":                    "Sig",                    # v3.12: registry code 7 (Syndica)
+    "AgavePaladin":           "Paladin",                # v3.12: registry code 4
+    "SolanaLabs":             "Agave",                  # v3.12: registry code 0
 }
 
 def normalize_client_id(client_id):
@@ -830,7 +851,7 @@ def normalize_client_id(client_id):
 
     SONDA canonical names (single source of truth, used in snapshots & frontend):
       Agave, Jito, Frankendancer, Firedancer, JitoBAM, FireBAM, Rakurai, Raiku,
-      HarmonicAgave, HarmonicFrankendancer, HarmonicFiredancer, HarmonicMajor,
+      HarmonicAgave, HarmonicFrankendancer, HarmonicFiredancer, Paladin, Sig, Mithril,
       Unknown (+ Unknown(N) for codes we don't know yet).
 
     Source-specific behaviour:
@@ -1494,9 +1515,10 @@ def load_endpoints(config_path, cluster):
             if not isinstance(locations, dict): continue
             for label, value in locations.items():
                 # Support both simple "ip:port" and dict {ip: ..., bam_id: ...}
-                bam_id = None
+                bam_id = None; check = None
                 if isinstance(value, dict):
                     bam_id = value.get("bam_id")
+                    check = value.get("check")  # v3.12: e.g. "tcp:50055" for BAM nodes without an API
                     value = str(value.get("ip", ""))
                 else:
                     value = str(value)
@@ -1505,12 +1527,12 @@ def load_endpoints(config_path, cluster):
                     ip, port = parse_ip_port(value)
                     eps.append({"provider": provider, "service": service, "label": label,
                                 "ip": ip, "port": port, "source": value, "resolved_via": "direct",
-                                "bam_id": bam_id})
+                                "bam_id": bam_id, "check": check})
                 else:
                     for rip in resolve_dns(value):
                         eps.append({"provider": provider, "service": service, "label": label,
                                     "ip": rip, "port": None, "source": value, "resolved_via": "dns",
-                                    "bam_id": bam_id})
+                                    "bam_id": bam_id, "check": check})
     return eps
 
 
@@ -2337,7 +2359,7 @@ class SolanaNetworkAnalyzer:
             node = NodeInfo(identity_pubkey=ep['ip'], ip_address=ep['ip'], role=role, name=name,
                 endpoint_provider=ep['provider'], endpoint_service=ep['service'],
                 endpoint_label=ep['label'], endpoint_port=ep.get('port'),
-                endpoint_bam_id=ep.get('bam_id'),
+                endpoint_bam_id=ep.get('bam_id'), endpoint_check=ep.get('check'),
                 is_jito=(ep['provider']=='jito'), _ep_source=ep.get('source',''))
             self.all_ips.add(ep['ip']); self.records.append(node); self.endpoint_records.append(node); c+=1
         logger.info(f"✅ {c} endpoints loaded")
@@ -2428,6 +2450,10 @@ class SolanaNetworkAnalyzer:
             futures = {}
             for node in other_eps:
                 method = EP_CHECK_METHOD.get(node.endpoint_service, "https")
+                if node.endpoint_service == "entrypoint" and node.endpoint_port:
+                    method = f"tcp:{node.endpoint_port}"  # v3.12: gossip port from endpoints.yaml (Alpenglow uses 8000)
+                if node.endpoint_check:
+                    method = node.endpoint_check  # v3.12: explicit check from endpoints.yaml wins (testnet/alpenglow BAM: tcp:50055)
                 f = ex.submit(check_endpoint, node.ip_address, node.endpoint_port, node._ep_source, method)
                 futures[f] = node
                 time.sleep(EP_CHECK_COOLDOWN)
@@ -2510,6 +2536,114 @@ class SolanaNetworkAnalyzer:
             raise RuntimeError(f"{method}: {j['error']}")
         return j.get("result")
 
+    def _rpc_json_url(self, url, method, params=None, timeout=5):
+        """JSON-RPC call against a specific URL (v3.12, cluster status)."""
+        r = requests.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []},
+                          timeout=timeout)
+        r.raise_for_status()
+        j = r.json()
+        if "error" in j:
+            raise RuntimeError(f"{method}: {j['error']}")
+        return j.get("result")
+
+    def _chain_status(self):
+        """v3.12: cluster status from every configured RPC URL, not just the
+        active one. Rules:
+          - any responding URL whose processed slot advanced since the previous
+            cycle -> the cluster is live (a stalled RPC cannot fake progress);
+          - every responding URL stands still (and we have a previous slot for
+            at least one) -> halted;
+          - URLs disagree on the genesis hash -> unknown (regenesis in flight,
+            stale fallback on the old chain);
+          - no previous slots yet (first cycle) or nobody answered -> unknown.
+        degraded = live, but delinquent stake >= CHAIN_DEGRADED_DELINQUENT_PCT
+        or finality lag above CHAIN_DEGRADED_LAG_SLOTS.
+        """
+        results = {}
+        for url in self.rpc_urls:
+            try:
+                g = self._rpc_json_url(url, "getGenesisHash")
+                s = self._rpc_json_url(url, "getSlot", [{"commitment": "processed"}])
+                results[url] = (g, s)
+            except Exception as e:
+                logger.debug(f"  chain status: {url} did not answer: {e}")
+        checked = len(results)
+        genesis_set = {g for g, _ in results.values() if g}
+        disagreement = "genesis" if len(genesis_set) > 1 else None
+        moving, stale, no_prev = [], [], []
+        now = time.time()
+        for url, (g, s) in results.items():
+            key = f"{self.cluster}:{url}"
+            prev = self.api_cache.get("chain_slot", key, 6 * 3600)
+            self.api_cache.set("chain_slot", key, {"slot": s, "ts": now})
+            if s is None or not prev or prev.get("slot") is None:
+                no_prev.append(url)
+            elif s > prev["slot"]:
+                moving.append(url)
+            else:
+                stale.append(url)
+
+        validators = [r for r in self.records if r.is_validator]
+        total = sum((r.stake_percentage or 0) for r in validators)
+        in_gossip = sum((r.stake_percentage or 0) for r in validators if r.ip_address)
+        delinquent = sum((r.stake_percentage or 0) for r in validators if r.delinquent)
+        stake_in_gossip = round(in_gossip * 100.0 / total, 2) if total else None
+        delinquent_pct = round(delinquent * 100.0 / total, 2) if total else None
+
+        if checked == 0 or disagreement:
+            status = "unknown"
+        elif moving:
+            lag = (self.chain or {}).get("finality_lag_slots")
+            degraded = (delinquent_pct is not None and delinquent_pct >= CHAIN_DEGRADED_DELINQUENT_PCT) or \
+                       (lag is not None and lag > CHAIN_DEGRADED_LAG_SLOTS)
+            status = "degraded" if degraded else "live"
+        elif stale:
+            status = "halted"
+        else:
+            status = "unknown"
+
+        halt = self.api_cache.get("chain_halt", self.cluster, 30 * 86400)
+        if status == "halted":
+            if not halt or not halt.get("since"):
+                halt = {"since": datetime.now(timezone.utc).isoformat()}
+                self.api_cache.set("chain_halt", self.cluster, halt)
+            halted_since = halt["since"]
+        else:
+            if halt and halt.get("since"):
+                self.api_cache.set("chain_halt", self.cluster, {"since": None})
+            halted_since = None
+
+        logger.info(f"🚦 Cluster status: {status} (rpcs checked {checked}, moving {len(moving)}, stale {len(stale)}; "
+                    f"stake in gossip {stake_in_gossip}%, delinquent {delinquent_pct}%)")
+        return {
+            "status": status,
+            "halted_since": halted_since,
+            "stake_in_gossip_pct": stake_in_gossip,
+            "delinquent_stake_pct": delinquent_pct,
+            "checked_rpcs": checked,
+            "stale_rpcs": stale,
+            "rpc_disagreement": disagreement,
+            "snapshot_rpc_stale": bool(moving) and self.cluster_url in stale,
+        }
+
+    def _providers_map(self):
+        """v3.12: {provider: {asns, tags, website, incidents, logo}} for every
+        ASN seen in this run, merged with dc_overrides.yaml. Logo is the
+        conventional R2 path assets/dc/AS<n>.png of the first ASN (the logos
+        job writes one file per ASN; the frontend falls back on 404)."""
+        out = {}
+        for asn, name in sorted(self.asn_names.items()):
+            dc = self.dc_overrides.get(asn) or {}
+            p = out.setdefault(name, {"asns": [], "tags": [], "website": None, "incidents": None, "logo": None})
+            p["asns"].append(asn)
+            for t in (dc.get("tags") or []):
+                if t not in p["tags"]:
+                    p["tags"].append(t)
+            p["website"] = p["website"] or dc.get("website")
+            p["incidents"] = p["incidents"] or dc.get("incidents")
+            p["logo"] = p["logo"] or dc.get("icon_url") or f"assets/dc/{asn}.png"
+        return out
+
     def _fetch_chain_vitals(self):
         """v3.11: metrics.chain for the homepage top cards (frontend note
         2026-09-07b). Non-critical: any failure leaves self.chain = None and
@@ -2565,7 +2699,17 @@ class SolanaNetworkAnalyzer:
                         f"tps {self.chain['tps']}, finality lag {lag} slots")
         except Exception as e:
             logger.warning(f"⚠️  Chain vitals unavailable this cycle: {e}")
-            self.chain = None
+            self.chain = {k: None for k in ("slot", "block_height", "window_s", "slot_time_ms", "tps",
+                                            "tps_non_vote", "tx_per_slot", "finality_lag_slots", "finality_ms",
+                                            "cu_per_block_avg", "source")}
+        # v3.12: cluster status from all RPC URLs, always present
+        try:
+            self.chain.update(self._chain_status())
+        except Exception as e:
+            logger.warning(f"⚠️  Cluster status unavailable this cycle: {e}")
+            self.chain.update({"status": "unknown", "halted_since": None, "stake_in_gossip_pct": None,
+                               "delinquent_stake_pct": None, "checked_rpcs": 0, "stale_rpcs": [],
+                               "rpc_disagreement": None, "snapshot_rpc_stale": False})
 
     def _fetch_genesis_hash(self):
         """Fetch cluster genesis hash. Critical for rollback detection in timeseries.
@@ -3077,10 +3221,10 @@ class SolanaNetworkAnalyzer:
     # canonical client is its own family.
     VERSION_FAMILY_OF = {
         "Agave": "agave-line", "Jito": "agave-line", "JitoBAM": "agave-line",
-        "HarmonicAgave": "agave-line", "HarmonicMajor": "agave-line",
+        "HarmonicAgave": "agave-line", "Paladin": "agave-line",
         "Rakurai": "agave-line", "Raiku": "agave-line",
         "Frankendancer": "frankendancer", "HarmonicFrankendancer": "frankendancer",
-        "Firedancer": "firedancer", "HarmonicFiredancer": "firedancer",
+        "Firedancer": "firedancer",  # HarmonicFiredancer deliberately absent: own family (Firedancer 26.x numbering while Firedancer is on 1.1.x)
         "FireBAM": "firebam",
     }
     VERSION_FAMILY_MIN = 5        # smaller families get version_status null
@@ -3244,6 +3388,7 @@ class SolanaNetworkAnalyzer:
             "asn_names": self.asn_names,
             "chain": self.chain,
             "client_unknown_codes": {str(k): v for k, v in sorted(self.client_unknown_codes.items())},
+            "providers": self._providers_map(),  # v3.12
         }
 
     def _bam_metrics(self, all_val):
@@ -3593,6 +3738,7 @@ class SolanaNetworkAnalyzer:
                 "delinquent": rec.delinquent,
                 "skip_rate": rec.skip_rate,
                 "client_type": rec.client_type,
+                "client_id_raw": rec.client_id_raw,  # v3.12
                 "is_rakurai": rec.is_rakurai or None,  # Only present when True
                 "slot_duration_median": rec.slot_duration_median,
                 "median_vote_latency": rec.median_vote_latency,

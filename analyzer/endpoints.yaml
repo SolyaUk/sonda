@@ -60,10 +60,20 @@ jito:
       dallas: "141.98.218.12:1002"
       new-york: "64.130.35.224:1002"
 
+    # BAM testnet nodes (bam.dev/validators): no explorer API, so each is
+    # checked by TCP on 50055, the port FireBAM/jito-solana connect to.
     bam:
-      dallas: dfw.testnet.bam.jito.wtf
-      new-york: ewr.testnet.bam.jito.wtf
-      salt-lake-city: slc.testnet.bam.jito.wtf
+      dallas: {ip: dfw.testnet.bam.jito.wtf, check: "tcp:50055"}
+      frankfurt: {ip: fra.testnet.bam.jito.wtf, check: "tcp:50055"}
+      new-york: {ip: ewr.testnet.bam.jito.wtf, check: "tcp:50055"}
+      salt-lake-city: {ip: slc.testnet.bam.jito.wtf, check: "tcp:50055"}
+      seattle: {ip: sea.testnet.bam.jito.wtf, check: "tcp:50055"}
+
+  alpenglow-community:
+    # single BAM node for the community cluster (Discord, 2026-09-04),
+    # validators use --bam-url http://198.13.140.247; checked on 50055
+    bam:
+      frankfurt: {ip: "198.13.140.247", check: "tcp:50055"}
 
 harmonic:
   mainnet:
@@ -135,8 +145,3 @@ solana:
     entrypoint:
       alpenglow-entrypoint-1: "64.130.37.11:8000"
       alpenglow-entrypoint-2: "213.239.141.16:8001"
-      
-    rpc:
-      alpenglow-rpc-triton: "alpenglow.rpcpool.com:443"
-      alpenglow-rpc-validblocks: "rpc.ag.validblocks.com:443"
-      alpenglow-rpc-ams: "rpc.ag.validator1.net"
