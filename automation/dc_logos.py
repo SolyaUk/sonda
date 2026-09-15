@@ -106,7 +106,7 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--dc-overrides", default=None, help="default: <repo>/analyzer/dc_overrides.yaml from config paths")
     ap.add_argument("--only", default=None, help="single ASN, e.g. AS20326")
-    ap.add_argument("--force", action="store_true", help="refetch even if a fresh local PNG exists")
+    ap.add_argument("--force", action="store_true", help="refetch and re-upload everything")
     ap.add_argument("--max-age-days", type=int, default=30)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -199,7 +199,10 @@ def main():
                 s3.put_object(Bucket=bucket, Key=key, Body=png, ContentType="image/png",
                               CacheControl="public, max-age=86400")
                 stats["uploaded"] += 1
-        index["logos"][asn] = {"logo": key, "source": origin, "sha256": sha,
+        # In dry-run keep the previously uploaded sha (None if never uploaded),
+        # so the next real run still uploads what was only simulated here.
+        index["logos"][asn] = {"logo": key, "source": origin,
+                               "sha256": prev.get("sha256") if args.dry_run else sha,
                                "provider": entry.get("display_name"), "updated": datetime.now(timezone.utc).isoformat()}
 
     index["generated"] = datetime.now(timezone.utc).isoformat()
