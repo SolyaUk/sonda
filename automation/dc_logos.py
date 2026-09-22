@@ -5,6 +5,8 @@ dc_logos.py
 Datacenter/provider logos for SONDA (backend item #39).
 
 For every "AS<n>" entry in analyzer/dc_overrides.yaml:
+  0. a hand-made file analyzer/dc_logos_manual/AS<n>.png wins over everything
+     and never expires (for providers without a usable favicon);
   1. icon_url in the entry wins (downloaded as is);
   2. otherwise Google's favicon service for the website host (sz=64);
   3. otherwise DuckDuckGo's icon service (ICO);
@@ -105,6 +107,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--dc-overrides", default=None, help="default: <repo>/analyzer/dc_overrides.yaml from config paths")
+    ap.add_argument("--manual-dir", default=None, help="hand-made logos AS<n>.png; default: <repo>/analyzer/dc_logos_manual")
     ap.add_argument("--only", default=None, help="single ASN, e.g. AS20326")
     ap.add_argument("--force", action="store_true", help="refetch and re-upload everything")
     ap.add_argument("--max-age-days", type=int, default=30)
@@ -116,6 +119,7 @@ def main():
     data_dir = Path(paths.get("data_dir", "/home/solya/sonda_data"))
     automation_dir = Path(paths.get("automation_dir", Path(args.config).resolve().parent))
     dc_path = Path(args.dc_overrides) if args.dc_overrides else automation_dir.parent / "analyzer" / "dc_overrides.yaml"
+    manual_dir = Path(args.manual_dir) if args.manual_dir else automation_dir.parent / "analyzer" / "dc_logos_manual"
     out_dir = data_dir / "dc_logos"
     out_dir.mkdir(parents=True, exist_ok=True)
     index_path = out_dir / "index.json"
@@ -150,13 +154,25 @@ def main():
     now = time.time()
     for asn, entry in sorted(dc.items()):
         local = out_dir / f"{asn}.png"
-        source = entry.get("icon_url") or entry.get("website")
-        if not source:
-            stats["no_logo"] += 1
-            index["logos"].pop(asn, None)
-            continue
+        manual = manual_dir / f"{asn}.png"
+        if manual.exists():
+            # Hand-made logo wins over every automatic source and never expires
+            try:
+                png = to_png64(manual.read_bytes()); origin = "manual"
+                local.write_bytes(png); stats["fetched"] += 1
+            except Exception as e:
+                log.warning(f"  {asn:10} manual logo unreadable: {e}"); stats["errors"] += 1; continue
+            source = None
+        else:
+            source = entry.get("icon_url") or entry.get("website")
+            if not source:
+                stats["no_logo"] += 1
+                index["logos"].pop(asn, None)
+                continue
         fresh = local.exists() and (now - local.stat().st_mtime) < args.max_age_days * 86400
-        if fresh and not args.force:
+        if source is None:
+            pass  # manual logo already in `png`
+        elif fresh and not args.force:
             png = local.read_bytes(); origin = index["logos"].get(asn, {}).get("source", "cache")
             stats["cached"] += 1
         else:

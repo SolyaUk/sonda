@@ -176,7 +176,7 @@
 # has referral program https://clients.webnx.com/affiliates.php
 "AS18450":
   display_name: "WebNX"
-  website: "https://clients.webnx.com"
+  website: "https://www.webnx.com"
   incidents: "https://clients.webnx.com/serverstatus.php"
 
 # Monogon SE — small German provider, AS202732
@@ -186,7 +186,7 @@
 "AS202732":
   display_name: "Monogon"
   website: "https://monogon.tech"
-  icon_url: "https://monogon.tech/monogon.svg"
+  icon_url: "https://monogon.tech/monogon.svg"  # SVG, not rasterised by dc_logos; the manual PNG in dc_logos_manual wins
   notes: "Operators may use Equinix peering/colocation in some locations"
 
 # Vultr — public cloud provider; Edgevana resells Vultr in many regions
@@ -272,7 +272,7 @@
 # has referral program https://billing.fiberstate.com/affiliates.php
 "AS26042":
   display_name: "Fiberstate"
-  website: "https://billing.fiberstate.com/index.php?rp=/store/bare-metal"
+  website: "https://fiberstate.com"
   incidents: "https://billing.fiberstate.com/serverstatus.php"
 
 # Helius — Solana RPC/infra provider, runs its own infrastructure
@@ -475,6 +475,8 @@
 # Validators: 7 | Stake: 0.53%
 "AS3402":
   display_name: "Butterfly Research"
+  website: "https://as3402.net"
+  notes: "site is a single image; logo kept manually in dc_logos_manual"
 
 # Google (YouTube ASN) — same as Google Cloud essentially
 # Validators: 1 | Stake: 0.33%
@@ -643,7 +645,9 @@
 # Validators: 1 | Stake: 1.31%
 "AS197235":
   display_name: "Avantel"
+  website: "https://ertelecom.ru/en"
   tags: ["isp"]
+  notes: "Avantel now belongs to ER-Telecom; legacy logo kept manually in dc_logos_manual"
 
 # Fusix Networks — NL network/hosting provider
 # Validators: 2 | Stake: 1.13%
@@ -915,8 +919,8 @@
 # Validators: 3 testnet | Stake: 0.16% testnet
 "AS207075":
   display_name: "Fountainhead Technologies"
-  website: null
-  notes: "registry site fountainhead.network is dead (2026-09); ipinfo ASN type Hosting, Hong Kong; Gemini's fountainhead.tech is unverified"
+  website: "https://www.fountainhead.io"
+  notes: "registry site fountainhead.network is dead (2026-09); fountainhead.io per web search 2026-09-22; ipinfo ASN type Hosting, Hong Kong; logo kept manually in dc_logos_manual"
 
 # LightSpeed Hosting, US cloud and dedicated servers. [both]
 # Validators: 1 testnet, 1 alpenglow
