@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 """
-Solana Network Decentralization Analyzer v3.12
+Solana Network Decentralization Analyzer v3.13
 ==============================================
+Changes from v3.12 (2026-09-24, v3.13 step 1; patch marker SONDA_PATCH_v3_13a):
+- Vote credits on every cluster: vote_credits_ratio (own credits this epoch /
+  best validator this cycle), epoch_credits_prev and vote_credits_ratio_prev
+  for the last completed epoch (one getVoteAccounts call per cycle), plus
+  metrics.validators.vote_credits_max / vote_credits_max_prev.
+- mean_vote_latency from Trillium next to median_vote_latency (mainnet).
+- metrics.endpoints.<provider>.by_service: reachability and geo per service.
+- provider_distribution (and stake_by_provider where stake is known) in every
+  geo block: bam.node_geo, bam.validator_geo, doublezero.*_geo, rakurai.
+- metrics.providers.<name>.logo is always the R2 path assets/dc/AS<n>.png of
+  the provider's first ASN in dc_overrides; icon_url is no longer exported.
+- features.pending[].description falls back to FEATURE_NAMES parsed from the
+  agave master feature-set/src/lib.rs (raw GitHub, cached 7 days, stale copy
+  on any error).
+
 Changes from v3.11.1 (2026-09-13):
 - Client id registry aligned with agave version/src/client_ids.rs: 7=Sig,
   9=HarmonicFiredancer, 12=FireBAM, 4=Paladin; the label HarmonicMajor is gone
@@ -473,6 +488,10 @@ class NodeInfo:
     sfdp_state: Optional[str] = None
     slot_duration_median: Optional[float] = None
     median_vote_latency: Optional[float] = None
+    mean_vote_latency: Optional[float] = None        # v3.13: Trillium mean latency in slots (finer than the integer median)
+    epoch_credits_prev: Optional[int] = None         # v3.13: credits earned in the last completed epoch (getVoteAccounts)
+    vote_credits_ratio: Optional[float] = None       # v3.13: epoch_credits / best validator this cycle (0..1)
+    vote_credits_ratio_prev: Optional[float] = None  # v3.13: the same for the last completed epoch
     testnet_pubkey: Optional[str] = None
     icon_url: Optional[str] = None
     website: Optional[str] = None
@@ -809,6 +828,13 @@ CHAIN_PERF_SAMPLES = 1
 CHAIN_DEGRADED_DELINQUENT_PCT = 33.4   # a third of stake delinquent: no supermajority for finality
 CHAIN_DEGRADED_LAG_SLOTS = 1000        # processed minus finalized; ~32 on Tower, ~1 on Alpenglow
 
+# v3.13: agave master feature catalog (pubkey -> description) for gates the
+# local CLI catalog does not know yet. Cached in api_cache (source
+# "feature_names"); on any fetch or parse error the stale copy is used.
+AGAVE_FEATURE_SET_URL = "https://raw.githubusercontent.com/anza-xyz/agave/master/feature-set/src/lib.rs"
+AGAVE_FEATURE_NAMES_TTL_S = 7 * 86400
+AGAVE_FEATURE_NAMES_MIN = 100          # fewer parsed entries than this = broken parse, keep the old copy
+
 # Trillium "Name (N)" → SONDA canonical mapping. When Trillium is used as a
 # fallback (e.g. if RPC didn't provide clientId for a validator), strip the
 # "(N)" suffix and translate Trillium-specific naming to our canonical form.
@@ -994,6 +1020,51 @@ def rate_nakamoto(n): return "Excellent" if n>=20 else "Good" if n>=15 else "Mod
 def rate_hhi(h): return "Competitive" if h<1500 else "Moderately concentrated" if h<2500 else "Highly concentrated"
 def rate_gini(g): return "Low inequality" if g<0.3 else "Moderate inequality" if g<0.5 else "High inequality"
 def rate_shannon(h): return "High diversity" if h>0.8 else "Moderate diversity" if h>0.5 else "Low diversity"
+
+
+def parse_agave_feature_names(text):
+    """v3.13: {feature pubkey: description} from agave feature-set/src/lib.rs.
+
+    Two passes. First the module tree: `pub mod name { declare_id!("...") }`
+    gives path -> pubkey (nested modules such as full_inflation::mainnet keep
+    their full path). Then the FEATURE_NAMES table: `(path::id(), "text")`
+    entries, spread over several lines by rustfmt, give path -> text. The
+    description strings are the ones `solana feature status` prints, so
+    newer gates carry their SIMD number already.
+    """
+    ids = {}
+    stack = []  # module names; None for braces that are not a module
+    mod_re = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
+    id_re = re.compile(r"declare_id!\s*\(\s*\"([1-9A-HJ-NP-Za-km-z]{32,44})\"\s*\)")
+    for line in text.splitlines():
+        s = line.split("//")[0]
+        m = mod_re.match(s)
+        if m:
+            stack.append(m.group(1))
+            rest = s[m.end():]
+        else:
+            rest = s
+            mi = id_re.search(s)
+            if mi:
+                path = "::".join(x for x in stack if x)
+                if path:
+                    ids[path] = mi.group(1)
+        for ch in rest:
+            if ch == "{":
+                stack.append(None)
+            elif ch == "}" and stack:
+                stack.pop()
+    names = {}
+    flat = re.sub(r"\s+", " ", text)
+    for m in re.finditer(r"\(\s*([A-Za-z0-9_:]+)::id\(\)\s*,\s*\"((?:[^\"\\]|\\.)*)\"\s*,?\s*\)", flat):
+        path, desc = m.group(1), m.group(2)
+        pk = ids.get(path)
+        if not pk:
+            cands = sorted({v for k, v in ids.items() if k == path or k.endswith("::" + path)})
+            pk = cands[0] if len(cands) == 1 else None
+        if pk:
+            names[pk] = desc.replace('\\"', '"')
+    return names
 
 
 # ========================================================================
@@ -1560,6 +1631,8 @@ class SolanaNetworkAnalyzer:
         self.asn_names = {}                      # v3.11: {"AS20326": "TeraSwitch"}
         self.chain = None                        # v3.11: metrics.chain
         self.client_unknown_codes = defaultdict(list)  # v3.11: {19785: [identity, ...]}
+        self.vote_credits_max = None             # v3.13: best epoch_credits this cycle (ratio denominator)
+        self.vote_credits_max_prev = None        # v3.13: best credits in the last completed epoch
         self.records: List[NodeInfo] = []
         self.all_ips: Set[str] = set()
         self.ip_to_records: Dict[str, List[NodeInfo]] = defaultdict(list)
@@ -1627,6 +1700,7 @@ class SolanaNetworkAnalyzer:
         if self.cluster == "mainnet-beta": self._create_bam_endpoints_from_api()
         self._check_endpoints_reachability()
         self._fetch_epoch()
+        self._fetch_vote_credits()  # v3.13: last completed epoch credits + ratios, non-critical
         self._fetch_features()
         self._fetch_chain_vitals()  # v3.11, non-critical
         # v3.10: BLS pubkeys on every cluster (VAT is active on mainnet and
@@ -1821,6 +1895,9 @@ class SolanaNetworkAnalyzer:
                     rec.testnet_pubkey = td.get("testnet_pubkey")
                     try:
                         if td.get("median_vote_latency") is not None: rec.median_vote_latency = float(td["median_vote_latency"])
+                    except (ValueError,TypeError): pass
+                    try:
+                        if td.get("mean_vote_latency") is not None: rec.mean_vote_latency = round(float(td["mean_vote_latency"]), 3)  # v3.13
                     except (ValueError,TypeError): pass
                     try:
                         if td.get("slot_duration_median") is not None: rec.slot_duration_median = float(td["slot_duration_median"])
@@ -2484,6 +2561,66 @@ class SolanaNetworkAnalyzer:
             self.epoch_completed_percent = (si/se*100) if se else 0
             logger.info(f"✅ Epoch: {self.current_epoch}, Slot: {self.current_slot}, {self.epoch_completed_percent:.1f}%")
 
+    def _fetch_vote_credits(self):
+        """v3.13: vote credit ratios on every cluster (non-critical).
+
+        vote_credits_ratio = the validator's credits in the current epoch
+        divided by the best validator's credits this cycle. It is noisy in the
+        first hour of an epoch and converges after; the *_prev pair is the
+        same number for the last completed epoch and is stable for a whole
+        epoch. Same definition as the Jito steward's vote_credits_ratio.
+
+        Credits per epoch come from one getVoteAccounts call: epochCredits is
+        [[epoch, credits, previous_credits], ...] for the last five epochs.
+        The current-epoch value from that call is preferred over the CLI's
+        epochCredits, which repeats the last voted epoch for a validator that
+        has not voted yet in this one. On any RPC error the ratios of the
+        current epoch fall back to epoch_credits and the *_prev fields stay
+        null for this cycle.
+        """
+        vals = [r for r in self.records if r.is_validator and r.vote_account]
+        if not vals or self.current_epoch is None:
+            return
+        cur_epoch = self.current_epoch
+        prev_epoch = cur_epoch - 1
+        cur, prev = {}, {}
+        try:
+            res = self._rpc_json("getVoteAccounts", [], timeout=60) or {}
+            for lst in (res.get("current") or [], res.get("delinquent") or []):
+                for va in lst:
+                    vote = va.get("votePubkey")
+                    hist = va.get("epochCredits") or []
+                    if not vote or not hist:
+                        continue
+                    c = p = 0
+                    for entry in hist:
+                        if len(entry) < 3:
+                            continue
+                        earned = max(0, int(entry[1]) - int(entry[2]))
+                        if entry[0] == cur_epoch:
+                            c = earned
+                        elif entry[0] == prev_epoch:
+                            p = earned
+                    cur[vote] = c; prev[vote] = p
+        except Exception as e:
+            logger.warning(f"⚠️  getVoteAccounts (vote credits): {e}; prev-epoch ratios null this cycle")
+        for r in vals:
+            if r.vote_account in prev:
+                r.epoch_credits_prev = prev[r.vote_account]
+        cur_credits = {r.vote_account: (cur.get(r.vote_account) if r.vote_account in cur else r.epoch_credits) for r in vals}
+        cur_max = max((v or 0) for v in cur_credits.values())
+        prev_max = max((r.epoch_credits_prev or 0) for r in vals)
+        self.vote_credits_max = cur_max or None
+        self.vote_credits_max_prev = prev_max or None
+        for r in vals:
+            cc = cur_credits.get(r.vote_account)
+            if cur_max and cc is not None:
+                r.vote_credits_ratio = round(cc / cur_max, 4)
+            if prev_max and r.epoch_credits_prev is not None:
+                r.vote_credits_ratio_prev = round(r.epoch_credits_prev / prev_max, 4)
+        logger.info(f"🗳  Vote credits: max {cur_max} in epoch {cur_epoch}, {prev_max} in epoch {prev_epoch}; "
+                    f"{len(cur)} vote accounts from RPC, {sum(1 for r in vals if r.epoch_credits_prev is not None)}/{len(vals)} matched")
+
     def _canonicalize_asn_names(self):
         """v3.11: one display name per ASN for the whole run, plus provider.
 
@@ -2641,8 +2778,19 @@ class SolanaNetworkAnalyzer:
                     p["tags"].append(t)
             p["website"] = p["website"] or dc.get("website")
             p["incidents"] = p["incidents"] or dc.get("incidents")
-            p["logo"] = p["logo"] or dc.get("icon_url") or f"assets/dc/{asn}.png"
+            # v3.13: the logo is always the R2 file the logos job writes,
+            # named after the provider's first ASN in dc_overrides, so it is
+            # the same file on every cluster whatever ASN the provider uses
+            # there. icon_url is an input of that job, not a frontend asset.
+            p["logo"] = p["logo"] or f"assets/dc/{self._registry_asn(name) or asn}.png"
         return out
+
+    def _registry_asn(self, display_name):
+        """v3.13: first plain ASN key in dc_overrides with this display_name."""
+        for key, entry in self.dc_overrides.items():
+            if "_" not in str(key) and isinstance(entry, dict) and entry.get("display_name") == display_name:
+                return key
+        return None
 
     def _fetch_chain_vitals(self):
         """v3.11: metrics.chain for the homepage top cards (frontend note
@@ -2888,6 +3036,18 @@ class SolanaNetworkAnalyzer:
         except Exception as e:
             logger.warning(f"⚠️  CLI feature status error: {e} — descriptions unavailable")
 
+        # v3.13: gates the local CLI catalog does not know yet (the CLI is
+        # older than the cluster) get their description from the agave master
+        # catalog. Only fetched when something is actually missing.
+        missing = [f["id"] for f in features_raw if f["id"] not in descriptions]
+        if missing:
+            agave = self._agave_feature_names()
+            filled = 0
+            for pk in missing:
+                if pk in agave:
+                    descriptions[pk] = agave[pk]; filled += 1
+            logger.info(f"  📚 agave catalog: {filled}/{len(missing)} missing descriptions filled")
+
         if accounts is None:
             cli_raw = []
             for pk, (st, sl) in cli_status.items():
@@ -2948,6 +3108,27 @@ class SolanaNetworkAnalyzer:
             for p in pending[:5]:
                 desc = p.get("description") or "(no description in CLI catalog)"
                 logger.info(f"  ⏳ Pending: {p['id'][:12]}... {desc[:70]}")
+
+    def _agave_feature_names(self):
+        """v3.13: {feature pubkey: description} from the agave master feature
+        catalog, cached in api_cache for AGAVE_FEATURE_NAMES_TTL_S. On any
+        fetch or parse error the last cached copy of any age is returned;
+        {} when nothing is known."""
+        cached = self.api_cache.get("feature_names", "agave-master", AGAVE_FEATURE_NAMES_TTL_S)
+        if cached:
+            return cached
+        try:
+            r = requests.get(AGAVE_FEATURE_SET_URL, timeout=20)
+            r.raise_for_status()
+            names = parse_agave_feature_names(r.text)
+            if len(names) < AGAVE_FEATURE_NAMES_MIN:
+                raise ValueError(f"only {len(names)} entries parsed")
+            self.api_cache.set("feature_names", "agave-master", names)
+            logger.info(f"  📚 agave feature catalog refreshed: {len(names)} gates")
+            return names
+        except Exception as e:
+            logger.warning(f"⚠️  agave feature catalog: {e}; using the stale copy if any")
+            return self.api_cache.get("feature_names", "agave-master", 10**9) or {}
 
     def _derive_consensus(self, features_raw, descriptions, source="rpc"):
         """Explicit consensus state of the cluster (v3.10).
@@ -3306,6 +3487,17 @@ class SolanaNetworkAnalyzer:
             m["reachable"] = sum(1 for r in peps if r.endpoint_reachable is True)
             m["unreachable"] = sum(1 for r in peps if r.endpoint_reachable is False)
             m["unverifiable"] = sum(1 for r in peps if r.endpoint_reachable is None)
+            # v3.13: the same numbers per service (bam, block-engine, ...) so
+            # the frontend can show e.g. "BAM nodes reachable / total".
+            by_service = {}
+            for svc in sorted(set(r.endpoint_service for r in peps if r.endpoint_service)):
+                seps = [r for r in peps if r.endpoint_service == svc]
+                sm = self._cat_metrics(seps)
+                sm["reachable"] = sum(1 for r in seps if r.endpoint_reachable is True)
+                sm["unreachable"] = sum(1 for r in seps if r.endpoint_reachable is False)
+                sm["unverifiable"] = sum(1 for r in seps if r.endpoint_reachable is None)
+                by_service[svc] = sm
+            m["by_service"] = by_service
             ep_metrics[prov] = m
 
         # DZ
@@ -3461,23 +3653,28 @@ class SolanaNetworkAnalyzer:
 
     def _geo_distributions(self, records, include_stake=False):
         """Compute country/asn/city distributions for a set of records."""
-        cc, ac, cic = Counter(), Counter(), Counter()
+        cc, ac, cic, pc = Counter(), Counter(), Counter(), Counter()
         for r in records:
             g = self.geo_data.get(r.ip_address)
             if g:
                 cc[g.country_code] += 1; ac[g.asn] += 1  # v3.11: keyed by ASN number, names in metrics.asn_names
                 cic[f"{normalize_city(g.city)}, {g.country_code}"] += 1
+                pc[g.provider or g.asn_name] += 1  # v3.13: provider level in every geo block
         result = {
             "country_distribution": dict(cc.most_common()),
             "asn_distribution": dict(ac.most_common()),
             "city_distribution": dict(cic.most_common()),
+            "provider_distribution": dict(pc.most_common()),
         }
         if include_stake:
-            scc = Counter()
+            scc, spc = Counter(), Counter()
             for r in records:
                 g = self.geo_data.get(r.ip_address)
-                if g: scc[g.country_code] += r.stake_percentage or 0
+                if g:
+                    scc[g.country_code] += r.stake_percentage or 0
+                    spc[g.provider or g.asn_name] += r.stake_percentage or 0
             result["stake_by_country"] = {k: round(v, 4) for k, v in scc.most_common()}
+            result["stake_by_provider"] = {k: round(v, 4) for k, v in spc.most_common()}  # v3.13
         return result
 
     def _ibrl_aggregates(self, ibrl_vals):
@@ -3529,6 +3726,8 @@ class SolanaNetworkAnalyzer:
         m["total_all"] = len(all_val); m["offline"] = len(all_val)-len(online)
         m["hidden"] = len([r for r in all_val if r.role=="validator-hidden"])
         m["inactive"] = len([r for r in all_val if r.role=="validator-inactive"])
+        m["vote_credits_max"] = self.vote_credits_max            # v3.13: denominator of vote_credits_ratio
+        m["vote_credits_max_prev"] = self.vote_credits_max_prev  # v3.13: last completed epoch
 
         sc, sa, sci, spv = defaultdict(float), defaultdict(float), defaultdict(float), defaultdict(float)
         vs = []
@@ -3742,6 +3941,10 @@ class SolanaNetworkAnalyzer:
                 "is_rakurai": rec.is_rakurai or None,  # Only present when True
                 "slot_duration_median": rec.slot_duration_median,
                 "median_vote_latency": rec.median_vote_latency,
+                "mean_vote_latency": rec.mean_vote_latency,              # v3.13
+                "epoch_credits_prev": rec.epoch_credits_prev,            # v3.13
+                "vote_credits_ratio": rec.vote_credits_ratio,            # v3.13
+                "vote_credits_ratio_prev": rec.vote_credits_ratio_prev,  # v3.13
                 "mev_commission": rec.mev_commission,
                 "is_sfdp": rec.is_sfdp,
                 "sfdp_state": rec.sfdp_state,
