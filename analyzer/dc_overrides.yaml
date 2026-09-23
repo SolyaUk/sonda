@@ -1100,6 +1100,27 @@
   website: "https://www.fetnet.net"
   tags: ["isp"]
 
+# ----------------------------------------------------------------------------
+# Added 2026-09-24: transit ASNs behind DoubleZero devices (seen in
+# doublezero.device_geo since v3.13 provider_distribution). [verified: PeeringDB
+# network type NSP + registry, backend line]
+# ----------------------------------------------------------------------------
+
+# Zayo (registry Zayo Bandwidth, PeeringDB aka AboveNet / MFNX), fiber backbone and IP transit.
+# DZ devices: 9 (mainnet) | Validators: 0
+"AS6461":
+  display_name: "Zayo"
+  website: "https://www.zayo.com"
+  tags: ["transit"]
+
+# Tata Communications (registry TATA Communications Ltd / Tata Communications (America) Inc,
+# global AS6453, ex Teleglobe and VSNL), tier-1 backbone and IP transit.
+# DZ devices: 6 (mainnet) | Validators: 0
+"AS6453":
+  display_name: "Tata Communications"
+  website: "https://www.tatacommunications.com"
+  tags: ["transit"]
+
 
 # ============================================================================
 # ASN_CITY-LEVEL OVERRIDES (specific DC location, overrides ASN-level)
