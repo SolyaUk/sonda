@@ -76,6 +76,10 @@ jito:
       frankfurt: {ip: "198.13.140.247", check: "tcp:50055"}
 
 harmonic:
+  # Source: docs.harmonic.gg/run-a-validator/endpoints (checked 2026-09-24).
+  # auction.* = legacy DNS of what Harmonic now calls the Block Engine; the
+  # be.* names below (service "bundles") point at the same servers. Both kept:
+  # endpoint history is keyed by these service names.
   mainnet:
     auction:
       amsterdam: ams.auction.harmonic.gg
@@ -84,6 +88,7 @@ harmonic:
       london: lon.auction.harmonic.gg
       tokyo: tyo.auction.harmonic.gg
       singapore: sgp.auction.harmonic.gg
+      salt-lake-city: slc.auction.harmonic.gg
 
     tpu-relayer:
       amsterdam: ams.tpu.harmonic.gg
@@ -92,14 +97,17 @@ harmonic:
       london: lon.tpu.harmonic.gg
       tokyo: tyo.tpu.harmonic.gg
       singapore: sgp.tpu.harmonic.gg
+      salt-lake-city: slc.tpu.harmonic.gg
 
+    # shred receivers now sit on the TPU hosts (UDP 8001, unverifiable)
     shred-receiver:
-      amsterdam: "64.130.42.138:8001"
-      newark: "198.73.57.238:8001"
-      frankfurt: "64.130.32.204:8001"
-      london: "64.130.63.16:8001"
-      tokyo: "63.254.162.99:8001"
-      singapore: "198.13.130.228:8001"
+      amsterdam: "63.254.166.232:8001"
+      newark: "64.130.45.196:8001"
+      frankfurt: "198.13.140.105:8001"
+      london: "64.130.46.242:8001"
+      tokyo: "198.13.133.200:8001"
+      singapore: "198.13.130.10:8001"
+      salt-lake-city: "64.130.33.192:8001"
 
     bundles:
       frankfurt: fra.be.harmonic.gg
@@ -108,6 +116,16 @@ harmonic:
       newark: ewr.be.harmonic.gg
       tokyo: tyo.be.harmonic.gg
       singapore: sgp.be.harmonic.gg
+
+  testnet:
+    # one region on testnet (Salt Lake City); block engine and TPU over HTTPS,
+    # shred receiver UDP (unverifiable)
+    auction:
+      salt-lake-city: testnet.be.harmonic.gg
+    tpu-relayer:
+      salt-lake-city: testnet.tpu.harmonic.gg
+    shred-receiver:
+      salt-lake-city: "64.130.53.76:8001"
 
 solana:
   mainnet:
