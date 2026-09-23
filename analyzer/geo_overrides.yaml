@@ -95,10 +95,6 @@ overrides:
   city: Amsterdam
   source: doublezero-verified
   dz_device_name: dz-ams-01
-- ip: 180.189.48.66
-  city: Tokyo
-  source: doublezero-verified
-  dz_device_name: dzd-ty15-001
 - ip: 180.87.146.210
   city: Hong Kong
   source: doublezero-verified
@@ -163,6 +159,10 @@ overrides:
   city: Pittsburgh
   source: doublezero-verified
   dz_device_name: dz103a-pit1-tsw
+- ip: 207.211.230.48
+  city: Tokyo
+  source: doublezero-verified
+  dz_device_name: dzd-ty15-001
 - ip: 208.185.121.234
   city: Dallas
   source: doublezero-verified

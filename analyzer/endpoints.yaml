@@ -117,15 +117,10 @@ harmonic:
       tokyo: tyo.be.harmonic.gg
       singapore: sgp.be.harmonic.gg
 
-  testnet:
-    # one region on testnet (Salt Lake City); block engine and TPU over HTTPS,
-    # shred receiver UDP (unverifiable)
-    auction:
-      salt-lake-city: testnet.be.harmonic.gg
-    tpu-relayer:
-      salt-lake-city: testnet.tpu.harmonic.gg
-    shred-receiver:
-      salt-lake-city: "64.130.53.76:8001"
+  # testnet (docs: Salt Lake City, testnet.be.harmonic.gg / testnet.tpu.harmonic.gg /
+  # 64.130.53.76:8001) is documented but the hosts accept no connection from
+  # outside (probed 2026-09-24: 80/443/8000/8001/8899/9000/10000/5005x all closed),
+  # so it is not listed here; re-check later.
 
 solana:
   mainnet:
