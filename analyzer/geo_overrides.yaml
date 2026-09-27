@@ -211,10 +211,6 @@ overrides:
   city: Tokyo
   source: doublezero-verified
   dz_device_name: dzd-tok-01
-- ip: 31.169.51.26
-  city: Oslo
-  source: doublezero-verified
-  dz_device_name: bdc-dzd-001
 - ip: 37.61.213.128
   city: Frankfurt
   source: doublezero-verified
