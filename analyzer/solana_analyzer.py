@@ -2,6 +2,11 @@
 """
 Solana Network Decentralization Analyzer v3.13
 ==============================================
+Changes in v3.13 step 2 follow-up (2026-09-27; patch marker SONDA_PATCH_v3_13b1):
+- Age: first_seen_epoch of young mainnet validators is backfilled within the
+  epoch (ring read stays capped per cycle but is retried every cycle); a vote
+  account with no usable data is retried once per epoch, not every cycle.
+
 Changes in v3.13 step 2 (2026-09-24; patch marker SONDA_PATCH_v3_13b):
 - Validator age (item #44, Jito JIP-25): first_seen_epoch, age_epochs,
   age_as_of_epoch, age_method (jip25 | history | lower_bound), age_sources on
@@ -2715,6 +2720,12 @@ class SolanaNetworkAnalyzer:
             e = self.api_cache.get("age", self._age_key(chain, vote), 10**9)
             if e is not None and e.get("as_of", -1) >= done:
                 entries[vote] = e; cached += 1
+                # v3.13b1: mainnet record with age but no first epoch yet (young
+                # validator, ring read deferred by the per-cycle cap): keep it
+                # pending for the ring read, once per epoch
+                if (self.cluster == "mainnet-beta" and e.get("count") is not None and e.get("first") is None
+                        and e.get("method") == "jip25" and e.get("first_checked_epoch") != cur):
+                    pending.append(vote)
                 continue
             if e is not None and self.cluster != "mainnet-beta":
                 if not rpc_ok:
@@ -2741,8 +2752,8 @@ class SolanaNetworkAnalyzer:
                 fetched, errors, deferred = self._age_vote_state(pending, entries, done, cur, chain, budget_left)
         have = 0
         for vote, e in entries.items():
-            if not e:
-                continue
+            if not e or e.get("count") is None:
+                continue  # nothing known, or a v3.13b1 "no data this epoch" marker
             r = by_vote[vote]
             r.first_seen_epoch = e.get("first"); r.age_epochs = e.get("count")
             r.age_as_of_epoch = e.get("as_of"); r.age_method = e.get("method")
@@ -2761,6 +2772,10 @@ class SolanaNetworkAnalyzer:
         # 1. header slices, at most once per validator per epoch
         todo = [v for v in pending if (entries.get(v) or {}).get("hdr_epoch") != cur]
         headers = {}
+        # v3.13b1: records already current this epoch that still lack a first
+        # epoch go straight to the ring read
+        need_full_seed = [v for v in pending if v not in todo and (entries.get(v) or {}).get("first") is None
+                          and (entries.get(v) or {}).get("count") is not None]
         calls = 0
         for i in range(0, len(todo), AGE_HEADER_BATCH):
             if calls >= AGE_HEADER_CALLS_PER_CYCLE or not budget_left():
@@ -2770,7 +2785,7 @@ class SolanaNetworkAnalyzer:
                 headers.update(vage.fetch_vh_headers(self.cluster_url, batch)); calls += 1
             except Exception as e:
                 logger.warning(f"⚠️  age: ValidatorHistory headers: {e}"); errors += len(batch); break
-        need_full = []; need_vote_state = []
+        need_full = list(need_full_seed); need_vote_state = []
         for vote, header in headers.items():
             old = entries.get(vote) or {}
             if header is None:
@@ -2808,6 +2823,7 @@ class SolanaNetworkAnalyzer:
                 if res is None:
                     need_vote_state.append(vote); continue
                 res["hdr_epoch"] = cur
+                res["first_checked_epoch"] = cur  # v3.13b1: no second ring read this epoch
                 if res["as_of"] < done:
                     res2 = vage.advance_ledger(res, self._vote_epoch_credits.get(vote), done)
                     if res2 is not None:
@@ -2854,6 +2870,11 @@ class SolanaNetworkAnalyzer:
             for vote, ents in states.items():
                 res = vage.lower_bound_age(ents, cur) if ents else None
                 if res is None:
+                    # v3.13b1: remember the miss for this epoch instead of asking again every cycle
+                    old = entries.get(vote) or {}
+                    if old.get("count") is None:
+                        self._age_store(entries, chain, vote, {"count": None, "as_of": done, "first": None,
+                                                                "method": None, "sources": [], "hdr_epoch": cur})
                     errors += 1; continue
                 old = entries.get(vote) or {}
                 if old.get("count") is not None:
