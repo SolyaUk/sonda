@@ -2,6 +2,15 @@
 """
 Solana Network Decentralization Analyzer v3.13
 ==============================================
+Changes in v3.13 step 2 (2026-09-24; patch marker SONDA_PATCH_v3_13b):
+- Validator age (item #44, Jito JIP-25): first_seen_epoch, age_epochs,
+  age_as_of_epoch, age_method (jip25 | history | lower_bound), age_sources on
+  every validator record; metrics.validators.age_summary. Mainnet reads the
+  on-chain ValidatorHistory header (6-byte slice, 100 accounts per call),
+  testnet bootstraps from svt.one, devnet and alpenglow from the vote state;
+  every cluster then advances its own ledger from getVoteAccounts. Module
+  validator_age.py, cache api_cache "age", oracle index under --data-dir.
+
 Changes from v3.12 (2026-09-24, v3.13 step 1; patch marker SONDA_PATCH_v3_13a):
 - Vote credits on every cluster: vote_credits_ratio (own credits this epoch /
   best validator this cycle), epoch_credits_prev and vote_credits_ratio_prev
@@ -143,6 +152,10 @@ import requests
 import subprocess
 import argparse
 import re
+try:
+    import validator_age as vage  # v3.13: JIP-25 age helpers, analyzer/validator_age.py next to this script
+except ImportError:
+    vage = None
 import random
 import signal
 import logging
@@ -492,6 +505,11 @@ class NodeInfo:
     epoch_credits_prev: Optional[int] = None         # v3.13: credits earned in the last completed epoch (getVoteAccounts)
     vote_credits_ratio: Optional[float] = None       # v3.13: epoch_credits / best validator this cycle (0..1)
     vote_credits_ratio_prev: Optional[float] = None  # v3.13: the same for the last completed epoch
+    first_seen_epoch: Optional[int] = None           # v3.13: first epoch with vote credits (vote account)
+    age_epochs: Optional[int] = None                 # v3.13: epochs with non-zero vote credits (JIP-25)
+    age_as_of_epoch: Optional[int] = None            # v3.13: last completed epoch included in age_epochs
+    age_method: Optional[str] = None                 # v3.13: jip25 | history | lower_bound
+    age_sources: Optional[List[str]] = None          # v3.13: validator_history, oracle_csv, svt_one, vote_state
     testnet_pubkey: Optional[str] = None
     icon_url: Optional[str] = None
     website: Optional[str] = None
@@ -834,6 +852,19 @@ CHAIN_DEGRADED_LAG_SLOTS = 1000        # processed minus finalized; ~32 on Tower
 AGAVE_FEATURE_SET_URL = "https://raw.githubusercontent.com/anza-xyz/agave/master/feature-set/src/lib.rs"
 AGAVE_FEATURE_NAMES_TTL_S = 7 * 86400
 AGAVE_FEATURE_NAMES_MIN = 100          # fewer parsed entries than this = broken parse, keep the old copy
+
+# v3.13 step 2: validator age (validator_age.py). Per-cycle load control; the
+# cached ledger (api_cache "age") means these limits only bite during warm-up
+# and in the first cycle after an epoch change.
+AGE_HEADER_BATCH = 100              # ValidatorHistory 6-byte header slices per getMultipleAccounts
+AGE_HEADER_CALLS_PER_CYCLE = 12     # mainnet: ~700 validators refresh in one cycle
+AGE_FULL_BATCH = 10                 # full 65 KB ValidatorHistory accounts per call (once per young validator)
+AGE_FULL_CALLS_PER_CYCLE = 5
+AGE_VOTE_STATE_BATCH = 100          # jsonParsed vote accounts per call (devnet, alpenglow, no-history fallback)
+AGE_VOTE_STATE_CALLS_PER_CYCLE = 3
+AGE_SVT_PER_CYCLE = 30              # svt.one history calls per cycle (testnet bootstrap, one per validator)
+AGE_FETCH_BUDGET_S = 90
+AGE_ORACLE_INDEX_FILE = "validator_age_oracle_index.json"  # under --data-dir; validator_age.py --build-oracle-index
 
 # Trillium "Name (N)" → SONDA canonical mapping. When Trillium is used as a
 # fallback (e.g. if RPC didn't provide clientId for a validator), strip the
@@ -1613,8 +1644,9 @@ def load_endpoints(config_path, cluster):
 
 class SolanaNetworkAnalyzer:
     def __init__(self, dbip_key="", ipinfo_token="", cluster="mainnet-beta", endpoints_config="endpoints.yaml",
-                 rpc_url=None, geo_overrides_path=None, dc_overrides_path=None):
+                 rpc_url=None, geo_overrides_path=None, dc_overrides_path=None, data_dir=None):
         self.cluster = cluster
+        self.data_dir = data_dir                 # v3.13: sonda_data dir (oracle index, pools cache)
         # v3.9: rpc_url is a single URL or an ordered list (primary first).
         # self.cluster_url is the ACTIVE URL and is updated on failover, so
         # every CLI call and JSON-RPC request in this run follows it.
@@ -1633,6 +1665,8 @@ class SolanaNetworkAnalyzer:
         self.client_unknown_codes = defaultdict(list)  # v3.11: {19785: [identity, ...]}
         self.vote_credits_max = None             # v3.13: best epoch_credits this cycle (ratio denominator)
         self.vote_credits_max_prev = None        # v3.13: best credits in the last completed epoch
+        self._vote_epoch_credits = {}            # v3.13: {vote: [(epoch, earned), ...]} from getVoteAccounts
+        self._oracle_index_cache = None          # v3.13: loaded once per run by _oracle_index
         self.records: List[NodeInfo] = []
         self.all_ips: Set[str] = set()
         self.ip_to_records: Dict[str, List[NodeInfo]] = defaultdict(list)
@@ -1701,6 +1735,7 @@ class SolanaNetworkAnalyzer:
         self._check_endpoints_reachability()
         self._fetch_epoch()
         self._fetch_vote_credits()  # v3.13: last completed epoch credits + ratios, non-critical
+        self._fetch_validator_age()  # v3.13 step 2: JIP-25 age, non-critical
         self._fetch_features()
         self._fetch_chain_vitals()  # v3.11, non-critical
         # v3.10: BLS pubkeys on every cluster (VAT is active on mainnet and
@@ -2593,15 +2628,18 @@ class SolanaNetworkAnalyzer:
                     if not vote or not hist:
                         continue
                     c = p = 0
+                    per_epoch = []
                     for entry in hist:
                         if len(entry) < 3:
                             continue
                         earned = max(0, int(entry[1]) - int(entry[2]))
+                        per_epoch.append((int(entry[0]), earned))
                         if entry[0] == cur_epoch:
                             c = earned
                         elif entry[0] == prev_epoch:
                             p = earned
                     cur[vote] = c; prev[vote] = p
+                    self._vote_epoch_credits[vote] = sorted(per_epoch)  # v3.13 step 2: age ledger input
         except Exception as e:
             logger.warning(f"⚠️  getVoteAccounts (vote credits): {e}; prev-epoch ratios null this cycle")
         for r in vals:
@@ -2620,6 +2658,213 @@ class SolanaNetworkAnalyzer:
                 r.vote_credits_ratio_prev = round(r.epoch_credits_prev / prev_max, 4)
         logger.info(f"🗳  Vote credits: max {cur_max} in epoch {cur_epoch}, {prev_max} in epoch {prev_epoch}; "
                     f"{len(cur)} vote accounts from RPC, {sum(1 for r in vals if r.epoch_credits_prev is not None)}/{len(vals)} matched")
+
+    def _oracle_index(self):
+        """v3.13: Jito age oracle index (mainnet), loaded once per run; {} when absent."""
+        if self._oracle_index_cache is not None:
+            return self._oracle_index_cache
+        self._oracle_index_cache = {}
+        if self.cluster == "mainnet-beta" and self.data_dir:
+            path = os.path.join(self.data_dir, AGE_ORACLE_INDEX_FILE)
+            try:
+                self._oracle_index_cache = vage.load_oracle_index(path)
+                logger.info(f"  📖 age oracle index: {len(self._oracle_index_cache)} vote accounts")
+            except FileNotFoundError:
+                logger.warning(f"⚠️  age oracle index missing ({path}); first_seen_epoch of old validators "
+                               f"stays null until it is built (validator_age.py --build-oracle-index)")
+            except Exception as e:
+                logger.warning(f"⚠️  age oracle index unreadable: {e}")
+        return self._oracle_index_cache
+
+    def _age_key(self, chain, vote):
+        return f"{self.cluster}:{chain}:{vote}"
+
+    def _fetch_validator_age(self):
+        """v3.13 step 2: validator age = epochs with non-zero vote credits (JIP-25).
+
+        Cached per (cluster, genesis, vote account) in api_cache source "age":
+        {first, count, as_of, method, sources}. Each cycle a cached number is
+        first advanced with this cycle's getVoteAccounts credits (free); a
+        source is asked only when nothing is cached yet or the gap cannot be
+        covered, within a per-cycle budget:
+          mainnet    ValidatorHistory header slice (6 bytes, 100 accounts per
+                     call, at most once per validator per epoch); full account
+                     once for validators the oracle does not know (first
+                     epoch) or whose header is not initialised (Jito recipe);
+                     vote state floor when there is no history account
+          testnet    svt.one per-epoch history, once per validator
+          devnet, alpenglow  jsonParsed vote state (up to 64 epochs) as a floor
+        Validators not reached this cycle keep their stale value or stay null.
+        """
+        if vage is None:
+            logger.warning("⚠️  validator_age.py not found next to the analyzer; age fields stay null")
+            return
+        vals = [r for r in self.records if r.is_validator and r.vote_account]
+        if not vals or self.current_epoch is None:
+            return
+        cur = self.current_epoch; done = cur - 1
+        chain = (self.genesis_hash or "nogenesis")[:8]
+        t0 = time.monotonic()
+        rpc_ok = bool(self._vote_epoch_credits)
+        by_vote = {r.vote_account: r for r in vals}
+        entries = {}
+        pending = []
+        cached = advanced = 0
+        for r in vals:
+            vote = r.vote_account
+            e = self.api_cache.get("age", self._age_key(chain, vote), 10**9)
+            if e is not None and e.get("as_of", -1) >= done:
+                entries[vote] = e; cached += 1
+                continue
+            if e is not None and self.cluster != "mainnet-beta":
+                if not rpc_ok:
+                    entries[vote] = e; cached += 1  # keep the stale value, no vote data this cycle
+                    continue
+                e2 = vage.advance_ledger(e, self._vote_epoch_credits.get(vote), done)
+                if e2 is not None:
+                    entries[vote] = e2; advanced += 1
+                    self.api_cache.set("age", self._age_key(chain, vote), e2)
+                    continue
+            entries[vote] = e
+            pending.append(vote)
+
+        def budget_left():
+            return time.monotonic() - t0 < AGE_FETCH_BUDGET_S
+
+        fetched = errors = deferred = 0
+        if pending:
+            if self.cluster == "mainnet-beta":
+                fetched, errors, deferred = self._age_mainnet(pending, entries, done, cur, chain, budget_left)
+            elif self.cluster == "testnet":
+                fetched, errors, deferred = self._age_testnet(pending, entries, by_vote, done, cur, chain, budget_left)
+            else:
+                fetched, errors, deferred = self._age_vote_state(pending, entries, done, cur, chain, budget_left)
+        have = 0
+        for vote, e in entries.items():
+            if not e:
+                continue
+            r = by_vote[vote]
+            r.first_seen_epoch = e.get("first"); r.age_epochs = e.get("count")
+            r.age_as_of_epoch = e.get("as_of"); r.age_method = e.get("method")
+            r.age_sources = list(e.get("sources") or []); have += 1
+        logger.info(f"🎂 Validator age: {have}/{len(vals)} known ({cached} current, {advanced} advanced, "
+                    f"{fetched} fetched, {errors} errors, {deferred} deferred, {time.monotonic() - t0:.1f}s)")
+
+    def _age_store(self, entries, chain, vote, e):
+        entries[vote] = e
+        self.api_cache.set("age", self._age_key(chain, vote), e)
+
+    def _age_mainnet(self, pending, entries, done, cur, chain, budget_left):
+        """Mainnet: on-chain ValidatorHistory. Returns (fetched, errors, deferred)."""
+        oracle = self._oracle_index()
+        fetched = errors = deferred = 0
+        # 1. header slices, at most once per validator per epoch
+        todo = [v for v in pending if (entries.get(v) or {}).get("hdr_epoch") != cur]
+        headers = {}
+        calls = 0
+        for i in range(0, len(todo), AGE_HEADER_BATCH):
+            if calls >= AGE_HEADER_CALLS_PER_CYCLE or not budget_left():
+                deferred += len(todo) - i; break
+            batch = todo[i:i + AGE_HEADER_BATCH]
+            try:
+                headers.update(vage.fetch_vh_headers(self.cluster_url, batch)); calls += 1
+            except Exception as e:
+                logger.warning(f"⚠️  age: ValidatorHistory headers: {e}"); errors += len(batch); break
+        need_full = []; need_vote_state = []
+        for vote, header in headers.items():
+            old = entries.get(vote) or {}
+            if header is None:
+                need_vote_state.append(vote); continue
+            if header[0] == 0 and header[1] == 0:
+                need_full.append(vote); continue  # not initialised: the recipe needs the ring
+            first = old.get("first")
+            o = oracle.get(vote)
+            if first is None:
+                if o:
+                    first = o["first"]
+                else:
+                    need_full.append(vote)  # young validator: first epoch from the ring, once
+            e = {"first": first, "count": header[0], "as_of": header[1], "method": "jip25",
+                 "sources": ["validator_history"] + (["oracle_csv"] if o else []), "hdr_epoch": cur}
+            if e["as_of"] < done:
+                e2 = vage.advance_ledger(e, self._vote_epoch_credits.get(vote), done)
+                if e2 is not None:
+                    e = e2
+            self._age_store(entries, chain, vote, e); fetched += 1
+        # 2. full accounts (ring buffer)
+        calls = 0
+        for i in range(0, len(need_full), AGE_FULL_BATCH):
+            if calls >= AGE_FULL_CALLS_PER_CYCLE or not budget_left():
+                deferred += len(need_full) - i; break
+            batch = need_full[i:i + AGE_FULL_BATCH]
+            try:
+                accounts = vage.fetch_vh_accounts(self.cluster_url, batch); calls += 1
+            except Exception as e:
+                logger.warning(f"⚠️  age: ValidatorHistory accounts: {e}"); errors += len(batch); break
+            for vote, raw in accounts.items():
+                header = vage.parse_vh_header(raw) if raw else None
+                rows = vage.parse_vh_ring(raw) if raw else []
+                res = vage.jip25_age(header, rows, oracle.get(vote), cur)
+                if res is None:
+                    need_vote_state.append(vote); continue
+                res["hdr_epoch"] = cur
+                if res["as_of"] < done:
+                    res2 = vage.advance_ledger(res, self._vote_epoch_credits.get(vote), done)
+                    if res2 is not None:
+                        res = res2
+                self._age_store(entries, chain, vote, res); fetched += 1
+        # 3. no history account: vote state floor
+        if need_vote_state:
+            f, er, d = self._age_vote_state(need_vote_state, entries, done, cur, chain, budget_left)
+            fetched += f; errors += er; deferred += d
+        return fetched, errors, deferred
+
+    def _age_testnet(self, pending, entries, by_vote, done, cur, chain, budget_left):
+        """Testnet: svt.one per-epoch history once per validator. Returns (fetched, errors, deferred)."""
+        fetched = errors = deferred = 0
+        need_vote_state = []
+        for i, vote in enumerate(pending):
+            if i >= AGE_SVT_PER_CYCLE or not budget_left():
+                deferred += len(pending) - i; break
+            rows = vage.fetch_svt_history(by_vote[vote].identity_pubkey, "testnet")
+            if rows is None:
+                errors += 1; continue
+            res = vage.history_age(rows, cur)
+            if res is None:
+                need_vote_state.append(vote); continue
+            self._age_store(entries, chain, vote, res); fetched += 1
+        if need_vote_state:
+            f, er, d = self._age_vote_state(need_vote_state, entries, done, cur, chain, budget_left)
+            fetched += f; errors += er; deferred += d
+        return fetched, errors, deferred
+
+    def _age_vote_state(self, pending, entries, done, cur, chain, budget_left):
+        """Floor from jsonParsed vote state (up to 64 epochs), merged with any
+        older cached value (max count, min first). Returns (fetched, errors, deferred)."""
+        fetched = errors = deferred = 0
+        calls = 0
+        for i in range(0, len(pending), AGE_VOTE_STATE_BATCH):
+            if calls >= AGE_VOTE_STATE_CALLS_PER_CYCLE or not budget_left():
+                deferred += len(pending) - i; break
+            batch = pending[i:i + AGE_VOTE_STATE_BATCH]
+            try:
+                states = vage.fetch_vote_states(self.cluster_url, batch); calls += 1
+            except Exception as e:
+                logger.warning(f"⚠️  age: vote states: {e}"); errors += len(batch); break
+            for vote, ents in states.items():
+                res = vage.lower_bound_age(ents, cur) if ents else None
+                if res is None:
+                    errors += 1; continue
+                old = entries.get(vote) or {}
+                if old.get("count") is not None:
+                    res["count"] = max(int(old["count"]), res["count"])
+                    firsts = [x for x in (old.get("first"), res.get("first")) if x is not None]
+                    res["first"] = min(firsts) if firsts else None
+                    for s in old.get("sources") or []:
+                        if s not in res["sources"]:
+                            res["sources"].append(s)
+                self._age_store(entries, chain, vote, res); fetched += 1
+        return fetched, errors, deferred
 
     def _canonicalize_asn_names(self):
         """v3.11: one display name per ASN for the whole run, plus provider.
@@ -3728,6 +3973,12 @@ class SolanaNetworkAnalyzer:
         m["inactive"] = len([r for r in all_val if r.role=="validator-inactive"])
         m["vote_credits_max"] = self.vote_credits_max            # v3.13: denominator of vote_credits_ratio
         m["vote_credits_max_prev"] = self.vote_credits_max_prev  # v3.13: last completed epoch
+        ages = sorted(r.age_epochs for r in all_val if r.age_epochs is not None)
+        m["age_summary"] = {  # v3.13 step 2
+            "known": len(ages), "total": len(all_val),
+            "methods": dict(Counter(r.age_method for r in all_val if r.age_method)),
+            "median_age_epochs": ages[len(ages) // 2] if ages else None,
+        }
 
         sc, sa, sci, spv = defaultdict(float), defaultdict(float), defaultdict(float), defaultdict(float)
         vs = []
@@ -3945,6 +4196,11 @@ class SolanaNetworkAnalyzer:
                 "epoch_credits_prev": rec.epoch_credits_prev,            # v3.13
                 "vote_credits_ratio": rec.vote_credits_ratio,            # v3.13
                 "vote_credits_ratio_prev": rec.vote_credits_ratio_prev,  # v3.13
+                "first_seen_epoch": rec.first_seen_epoch,                # v3.13 step 2 (item #44)
+                "age_epochs": rec.age_epochs,                            # v3.13 step 2
+                "age_as_of_epoch": rec.age_as_of_epoch,                  # v3.13 step 2
+                "age_method": rec.age_method,                            # v3.13 step 2
+                "age_sources": rec.age_sources,                          # v3.13 step 2
                 "mev_commission": rec.mev_commission,
                 "is_sfdp": rec.is_sfdp,
                 "sfdp_state": rec.sfdp_state,
@@ -4061,6 +4317,7 @@ def main():
     parser.add_argument("--endpoints", default="endpoints.yaml")
     parser.add_argument("--geo-overrides", default="geo_overrides.yaml", help="Geo overrides YAML (auto-generated from DZ + admin)")
     parser.add_argument("--dc-overrides", default=None, help="dc_overrides.yaml (default: next to this script); provider names for ASNs")
+    parser.add_argument("--data-dir", default=None, help="sonda_data directory: validator age oracle index, pools cache (v3.13)")
     parser.add_argument("--export", action="store_true")
     parser.add_argument("--output", help="Output file")
     args = parser.parse_args()
@@ -4069,7 +4326,7 @@ def main():
     a = SolanaNetworkAnalyzer(dbip_key=args.dbip_key, ipinfo_token=ipinfo, cluster=args.cluster,
                               endpoints_config=args.endpoints, rpc_url=args.rpc_url,
                               geo_overrides_path=args.geo_overrides,
-                              dc_overrides_path=args.dc_overrides)
+                              dc_overrides_path=args.dc_overrides, data_dir=args.data_dir)
     if not a.fetch_all_data(): sys.exit(EXIT_CRITICAL)
     if args.export or args.output: a.export_data(output_file=args.output)
     else: a.print_full_report()

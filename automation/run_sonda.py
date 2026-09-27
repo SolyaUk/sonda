@@ -349,6 +349,11 @@ class ClusterWorker:
             argv += ["--endpoints", str(endpoints)]
         if geo_overrides.exists():
             argv += ["--geo-overrides", str(geo_overrides)]
+        # v6.9.2 (SONDA_PATCH_v6_9_2): the analyzer reads the validator age
+        # oracle index and the pools cache from the data directory.
+        data_dir = (self.global_cfg.get("paths") or {}).get("data_dir")
+        if data_dir:
+            argv += ["--data-dir", str(data_dir)]
 
         rc = self._run_subprocess(argv, timeout=ANALYZER_TIMEOUT, stage="analyze")
         if rc != 0:

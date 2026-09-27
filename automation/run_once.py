@@ -60,6 +60,9 @@ def run_analyzer(cfg: dict, cluster: str, snapshot_path: Path) -> bool:
         cmd += ["--endpoints", str(endpoints)]
     if geo_overrides.exists():
         cmd += ["--geo-overrides", str(geo_overrides)]
+    data_dir = (cfg.get("paths") or {}).get("data_dir")  # v6.9.2 (SONDA_PATCH_v6_9_2)
+    if data_dir:
+        cmd += ["--data-dir", str(data_dir)]
 
     logger.info(f"🔬 Running analyzer for {cluster}...")
     t0 = time.time()
