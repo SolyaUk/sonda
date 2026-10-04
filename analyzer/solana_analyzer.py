@@ -2,6 +2,11 @@
 """
 Solana Network Decentralization Analyzer v3.13
 ==============================================
+Changes in v3.13 step 4 follow-up (2026-10-05; patch marker SONDA_PATCH_v3_13d1):
+- Multicast publishers are mapped onto records even while Malbec is down (last
+  good publisher lists plus the groups listed by the CLI); publishers cache
+  keyed by DZ environment so alpenglow shares the mainnet lists.
+
 Changes in v3.13 step 4 (2026-10-05; patch marker SONDA_PATCH_v3_13d):
 - DoubleZero on testnet (Malbec env=testnet) and alpenglow-community (DZ
   mainnet environment); when Malbec fails the last good Malbec answer is used
@@ -2237,7 +2242,7 @@ class SolanaNetworkAnalyzer:
             # === PUBLISHERS per active group ===
             active_groups = [g for g in self.dz_multicast_groups
                             if (g.get("publisher_count") or g.get("publishers", 0)) > 0]
-            if active_groups and self.dz_malbec_available:
+            if active_groups or self.dz_publishers_by_ip:  # v3.13d1: map publishers in every mode
                 self._fetch_dz_multicast_publishers(active_groups)
 
         except Exception as e:
@@ -2246,11 +2251,18 @@ class SolanaNetworkAnalyzer:
     def _fetch_dz_multicast_publishers(self, active_groups):
         """Fetch publisher lists for active multicast groups and map to validators."""
         all_publishers_cache_key = "dz_publishers"
-        dz_env = self.cluster
+        dz_env = DZ_CLUSTER_ENV.get(self.cluster, self.cluster)  # v3.13d1: alpenglow shares mainnet lists
         cached = self.api_cache.get(all_publishers_cache_key, dz_env, API_TTL["dz_publishers"])
         if cached is not None:
             logger.info("  📦 DZ publishers from cache")
             publishers_data = cached
+        elif not self.dz_malbec_available:
+            # v3.13d1: Malbec is down this run; do not knock on it per group,
+            # take the last good lists of any age (may be empty) and rely on
+            # the CLI-derived map built in _fetch_doublezero
+            publishers_data = self.api_cache.get(all_publishers_cache_key, dz_env, 10**9) or {}
+            if publishers_data:
+                logger.info("  ♻️  DZ publishers from the last good answer")
         else:
             publishers_data = {}  # group_code -> list of publisher dicts
             def _fetch_group_publishers(g):
