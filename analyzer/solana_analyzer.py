@@ -2,6 +2,29 @@
 """
 Solana Network Decentralization Analyzer v3.13
 ==============================================
+Changes in v3.13 step 4 (2026-10-05; patch marker SONDA_PATCH_v3_13d):
+- DoubleZero on testnet (Malbec env=testnet) and alpenglow-community (DZ
+  mainnet environment); when Malbec fails the last good Malbec answer is used
+  before the CLI, CLI answers are normalised (user_type, device_name,
+  publishers) and never overwrite the Malbec cache; metrics.doublezero.source
+  and source_age_s; DZ cache TTL 5 min.
+- Age: "no data" markers are re-bootstrapped instead of advanced; age_epochs
+  clamped to the epoch span; svt.one activity evidence and data-floor handling
+  in validator_age.py v1.1; cross-check against Jito normalised by epoch gap.
+- Pools: metrics.pools.<pool>.places, cutoff_score, steward parameters;
+  jpool_perf.perf_stake_sol and has_perf_stake on the record.
+
+Changes in v3.13 step 3 (2026-10-02; patch marker SONDA_PATCH_v3_13c):
+- Pool ranks (item #45): record.pool_ranks on mainnet from <data-dir>/
+  pools_cache.json (automation/pools_fetch.py, every 30 min from run_sonda):
+  Jito steward (rank, score, eligible, failed components), xSHIN (rank, score,
+  in_pool, pool_rank, noneligibility), SOL Strategies / Stakewiz (rank, score,
+  location_penalty, four concentration components), JPool performance (rank);
+  has_stake and stake_sol from the on-chain ValidatorList of each pool. Only
+  pools where the validator is present, {} when in none, null off mainnet or
+  without a cache. metrics.pools with totals and cache age. Age cross-check
+  against Jito's validator_age in the log.
+
 Changes in v3.13 step 2 follow-up (2026-09-27; patch marker SONDA_PATCH_v3_13b1):
 - Age: first_seen_epoch of young mainnet validators is backfilled within the
   epoch (ring read stays capped per cycle but is retried every cycle); a vote
@@ -515,6 +538,7 @@ class NodeInfo:
     age_as_of_epoch: Optional[int] = None            # v3.13: last completed epoch included in age_epochs
     age_method: Optional[str] = None                 # v3.13: jip25 | history | lower_bound
     age_sources: Optional[List[str]] = None          # v3.13: validator_history, oracle_csv, svt_one, vote_state
+    pool_ranks: Optional[Dict] = None                # v3.13 step 3: {pool: {rank, score, has_stake, stake_sol, ...}} mainnet only
     testnet_pubkey: Optional[str] = None
     icon_url: Optional[str] = None
     website: Optional[str] = None
@@ -871,6 +895,17 @@ AGE_SVT_PER_CYCLE = 30              # svt.one history calls per cycle (testnet b
 AGE_FETCH_BUDGET_S = 90
 AGE_ORACLE_INDEX_FILE = "validator_age_oracle_index.json"  # under --data-dir; validator_age.py --build-oracle-index
 
+# v3.13 step 3: performance stake pools (pools_fetch.py -> <data-dir>/pools_cache.json)
+POOLS_CACHE_FILE = "pools_cache.json"
+POOLS_CACHE_MAX_AGE_S = 4 * 3600         # older than this = reported as stale in metrics.pools
+POOL_KEYS = ("jito", "shinobi", "solstrategies", "jpool_perf")
+POOL_STAKE_KEY = {"jito": "jito", "shinobi": "shinobi", "solstrategies": "solstrategies", "jpool_perf": "jpool"}
+
+# v3.13 step 4: which DoubleZero environment serves which Solana cluster.
+# Alpenglow validators join the DZ mainnet environment with their alpenglow
+# identity (DZ team in #ag-community-cluster, 2026-10-04); devnet DZ is a lab.
+DZ_CLUSTER_ENV = {"mainnet-beta": "mainnet-beta", "testnet": "testnet", "alpenglow-community": "mainnet-beta"}
+
 # Trillium "Name (N)" → SONDA canonical mapping. When Trillium is used as a
 # fallback (e.g. if RPC didn't provide clientId for a validator), strip the
 # "(N)" suffix and translate Trillium-specific naming to our canonical form.
@@ -1103,6 +1138,38 @@ def parse_agave_feature_names(text):
     return names
 
 
+def _dz_is_cli_format(items):
+    """True when a cached DZ list came from the doublezero CLI (v3.13 step 4)."""
+    for it in items or []:
+        if isinstance(it, dict):
+            return "user_type" in it or ("account" in it and "pk" not in it)
+    return False
+
+
+def _dz_normalize_users(users):
+    """v3.13 step 4: give CLI user rows the keys the Malbec rows have.
+    CLI: user_type IBRL|Multicast, device_name, location_code/name, client_ip,
+    publishers/subscribers as comma separated group codes. Malbec rows pass
+    through untouched."""
+    out = []
+    for u in users or []:
+        if not isinstance(u, dict):
+            continue
+        if "kind" in u or "user_type" not in u:
+            out.append(u); continue
+        v = dict(u)
+        v["kind"] = str(u.get("user_type") or "").lower()
+        v.setdefault("device_code", u.get("device_name", ""))
+        v.setdefault("metro_code", u.get("location_code", ""))
+        v.setdefault("metro_name", u.get("location_name", ""))
+        pubs = u.get("publishers") or ""
+        if isinstance(pubs, str):
+            pubs = [p.strip() for p in pubs.split(",") if p.strip()]
+        v["_cli_publishers"] = list(pubs)
+        out.append(v)
+    return out
+
+
 # ========================================================================
 # CACHE
 # ========================================================================
@@ -1211,6 +1278,15 @@ class APICache:
                           (source, key, json.dumps(data, ensure_ascii=False), time.time()))
         except Exception as e: logger.error(f"❌ API cache WRITE FAILED — entries lost: {e}")
 
+    def fetched_at(self, source, key="default"):
+        """v3.13 step 4: unix time of the cached entry, or None."""
+        try:
+            with sqlite3.connect(self.db_path) as c:
+                row = c.execute("SELECT fetched_at FROM api_cache WHERE source=? AND key=?", (source, key)).fetchone()
+            return float(row[0]) if row else None
+        except Exception:
+            return None
+
     def invalidate(self, source, key=None):
         try:
             with sqlite3.connect(self.db_path) as c:
@@ -1221,9 +1297,9 @@ class APICache:
 # API cache TTL in seconds
 API_TTL = {
     "trillium": 1800,          # 30 min
-    "dz_devices": 120,         # 2 min — core monitoring
-    "dz_users": 120,           # 2 min — core monitoring
-    "dz_multicast": 120,       # 2 min — core monitoring
+    "dz_devices": 300,         # 5 min (v3.13 step 4: three clusters share Malbec now)
+    "dz_users": 300,           # 5 min
+    "dz_multicast": 300,       # 5 min
     "dz_publishers": 120,      # 2 min — multicast publisher lists
     "dz_health_devices": 300,  # 5 min — matches DZ update frequency
     "dz_health_links": 300,    # 5 min — matches DZ update frequency
@@ -1672,6 +1748,7 @@ class SolanaNetworkAnalyzer:
         self.vote_credits_max_prev = None        # v3.13: best credits in the last completed epoch
         self._vote_epoch_credits = {}            # v3.13: {vote: [(epoch, earned), ...]} from getVoteAccounts
         self._oracle_index_cache = None          # v3.13: loaded once per run by _oracle_index
+        self.pools_meta = None                   # v3.13 step 3: metrics.pools (mainnet, when the cache exists)
         self.records: List[NodeInfo] = []
         self.all_ips: Set[str] = set()
         self.ip_to_records: Dict[str, List[NodeInfo]] = defaultdict(list)
@@ -1729,8 +1806,8 @@ class SolanaNetworkAnalyzer:
         self._fetch_genesis_hash()
         self._fetch_validator_info()
         if self.cluster == "mainnet-beta": self._fetch_trillium()
-        if self.cluster == "mainnet-beta": self._fetch_doublezero()
-        if self.cluster == "mainnet-beta": self._fetch_dz_multicast()
+        if self.cluster in DZ_CLUSTER_ENV: self._fetch_doublezero()  # v3.13 step 4: mainnet, testnet, alpenglow
+        if self.cluster in DZ_CLUSTER_ENV: self._fetch_dz_multicast()  # v3.13 step 4
         if self.cluster == "mainnet-beta": self._fetch_bam()
         if self.cluster == "mainnet-beta": self._fetch_rakurai()
         if self.cluster == "mainnet-beta": self._fetch_dz_health()
@@ -1741,6 +1818,7 @@ class SolanaNetworkAnalyzer:
         self._fetch_epoch()
         self._fetch_vote_credits()  # v3.13: last completed epoch credits + ratios, non-critical
         self._fetch_validator_age()  # v3.13 step 2: JIP-25 age, non-critical
+        self._attach_pool_ranks()    # v3.13 step 3: pools_cache.json, non-critical
         self._fetch_features()
         self._fetch_chain_vitals()  # v3.11, non-critical
         # v3.10: BLS pubkeys on every cluster (VAT is active on mainnet and
@@ -1946,18 +2024,63 @@ class SolanaNetworkAnalyzer:
             logger.info(f"✅ Trillium: {upd} updated (gap-filled name: {gap_name}, icon: {gap_icon})")
         except Exception as e: logger.warning(f"⚠️  Trillium: {e}")
 
+    def _dz_source_mark(self, kind, fetched_at=None):
+        """v3.13 step 4: remember the weakest DZ data source used this run."""
+        order = {"malbec": 0, "malbec-stale": 1, "cli": 2}
+        cur = getattr(self, "dz_source", None)
+        if cur is None or order.get(kind, 3) > order.get(cur, 0):
+            self.dz_source = kind
+        if fetched_at:
+            age = int(time.time() - fetched_at)
+            self.dz_source_age_s = max(getattr(self, "dz_source_age_s", 0) or 0, age)
+
+    def _dz_cached_or_fetch(self, slot, dz_env, path, params, cli_args, label):
+        """v3.13 step 4: Malbec first (fresh cache, then API), then the last good
+        Malbec answer of any age, then the CLI. CLI answers never land in the
+        Malbec cache slot. Returns the list (possibly empty)."""
+        data = self.api_cache.get(slot, dz_env, API_TTL[slot])
+        if data is not None:
+            logger.info(f"  📦 DZ {label} from cache")
+            self._dz_source_mark("malbec")
+            return data
+        data = _fetch_malbec_paginated(path, params)
+        if data is not None:
+            self.dz_malbec_available = True
+            self.api_cache.set(slot, dz_env, data)
+            self._dz_source_mark("malbec")
+            return data
+        stale = self.api_cache.get(slot, dz_env, 10**9)
+        if stale is not None and not _dz_is_cli_format(stale):
+            logger.warning(f"  ♻️  Malbec down, using the last good {label} answer")
+            self._dz_source_mark("malbec-stale", self.api_cache.fetched_at(slot, dz_env))
+            return stale
+        try:
+            r = subprocess.run(["doublezero", "--env", dz_env] + cli_args + ["--json"],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                try: data = json.loads(r.stdout)
+                except Exception: data = []
+                self.api_cache.set(slot + "_cli", dz_env, data)
+                self._dz_source_mark("cli")
+                return data
+            logger.warning(f"  ⚠️  DZ {label} CLI rc={r.returncode}")
+        except FileNotFoundError:
+            logger.warning("  ⚠️  doublezero CLI not found")
+        except Exception as e:
+            logger.warning(f"  ⚠️  DZ {label} CLI: {e}")
+        self._dz_source_mark("cli")
+        return []
+
     def _fetch_doublezero(self):
         logger.info("🔌 Fetching DoubleZero...")
-        # DZ doesn't exist on Alpenglow community cluster (different network).
-        # Skip fetch entirely; dz_malbec_available stays False, all DZ fields null.
-        if self.cluster == "alpenglow-community":
-            logger.info("  ⏭️  DZ skipped (not available on alpenglow-community)")
-            return
-        dz_env = {"mainnet-beta":"mainnet-beta","testnet":"testnet","devnet":"devnet"}.get(self.cluster, "mainnet-beta")
+        dz_env = DZ_CLUSTER_ENV.get(self.cluster, "mainnet-beta")
+        malbec_params = {"env": dz_env} if dz_env != "mainnet-beta" else None
+        env_q = f"&env={dz_env}" if dz_env != "mainnet-beta" else ""
+        self.dz_source = None; self.dz_source_age_s = None
 
         # === METROS (map metro_code → metro_name, needed for devices API) ===
         metro_names = {}  # code -> name
-        metros_resp = _fetch_malbec_single("metros?limit=100&offset=0")
+        metros_resp = _fetch_malbec_single("metros?limit=100&offset=0" + env_q)
         if metros_resp:
             items = metros_resp.get("items", metros_resp) if isinstance(metros_resp, dict) else metros_resp
             for m in (items if isinstance(items, list) else []):
@@ -1965,26 +2088,8 @@ class SolanaNetworkAnalyzer:
             if metro_names: self.dz_malbec_available = True
 
         # === DEVICES (Malbec API primary, CLI fallback) ===
-        devices = self.api_cache.get("dz_devices", dz_env, API_TTL["dz_devices"])
-        if devices is not None:
-            logger.info("  📦 DZ devices from cache")
-        else:
-            devices = _fetch_malbec_paginated("devices")
-            if devices is not None:
-                self.dz_malbec_available = True
-                self.api_cache.set("dz_devices", dz_env, devices)
-            else:
-                # CLI fallback
-                try:
-                    r = subprocess.run(["doublezero","--env",dz_env,"device","list","--json"],
-                                       capture_output=True, text=True, timeout=30)
-                    if r.returncode == 0:
-                        try: devices = json.loads(r.stdout)
-                        except: devices = []
-                        self.api_cache.set("dz_devices", dz_env, devices)
-                    else: devices = []
-                except FileNotFoundError: logger.warning("  ⚠️  doublezero CLI not found"); devices = []
-                except Exception as e: logger.warning(f"  ⚠️  DZ devices CLI: {e}"); devices = []
+        devices = self._dz_cached_or_fetch("dz_devices", dz_env, "devices", malbec_params,
+                                           ["device", "list"], "devices")  # v3.13 step 4
 
         if devices:
             logger.info(f"✅ {len(devices)} DZ devices")
@@ -2018,25 +2123,9 @@ class SolanaNetworkAnalyzer:
                     }
 
         # === USERS (Malbec API primary, CLI fallback) ===
-        users = self.api_cache.get("dz_users", dz_env, API_TTL["dz_users"])
-        if users is not None:
-            logger.info("  📦 DZ users from cache")
-        else:
-            users = _fetch_malbec_paginated("users")
-            if users is not None:
-                self.dz_malbec_available = True
-                self.api_cache.set("dz_users", dz_env, users)
-            else:
-                # CLI fallback
-                try:
-                    r = subprocess.run(["doublezero","--env",dz_env,"user","list","--json"],
-                                       capture_output=True, text=True, timeout=30)
-                    if r.returncode == 0:
-                        try: users = json.loads(r.stdout)
-                        except: users = []
-                        self.api_cache.set("dz_users", dz_env, users)
-                    else: users = []
-                except Exception as e: logger.warning(f"  ⚠️  DZ users CLI: {e}"); users = []
+        users = self._dz_cached_or_fetch("dz_users", dz_env, "users", malbec_params,
+                                         ["user", "list"], "users")  # v3.13 step 4
+        users = _dz_normalize_users(users)
 
         if users:
             logger.info(f"✅ {len(users)} DZ users")
@@ -2064,6 +2153,17 @@ class SolanaNetworkAnalyzer:
                                 rec.dz_device_name = rec.dz_device_name or u.get("device_name", "")
                                 rec.dz_location = rec.dz_location or u.get("location_name", "")
 
+            # v3.13 step 4: when Malbec is down the CLI rows carry the groups a
+            # user publishes to; keep them so dz_multicast_publisher survives
+            if not self.dz_malbec_available:
+                for u in users:
+                    for code in u.get("_cli_publishers") or []:
+                        cip = u.get("client_ip")
+                        if cip:
+                            self.dz_publishers_by_ip.setdefault(cip, [])
+                            if code not in self.dz_publishers_by_ip[cip]:
+                                self.dz_publishers_by_ip[cip].append(code)
+
             # Map users to validator records by client_ip
             for rec in self.records:
                 if not rec.ip_address or rec.is_dz_device: continue
@@ -2083,7 +2183,9 @@ class SolanaNetworkAnalyzer:
                     if not rec.dz_metro_code: rec.dz_metro_code = metro[0]
 
         # === Auto-generate geo overrides from DZ devices ===
-        if self.geo_overrides_path:
+        # v3.13 step 4: only the mainnet run writes them (testnet devices are a
+        # different set, alpenglow sees the same devices as mainnet)
+        if self.geo_overrides_path and self.cluster == "mainnet-beta":
             dz_devices = [r for r in self.records if r.is_dz_device]
             dz_overrides = generate_dz_overrides(dz_devices)
             existing = load_geo_overrides(self.geo_overrides_path)
@@ -2096,11 +2198,11 @@ class SolanaNetworkAnalyzer:
     def _fetch_dz_multicast(self):
         """Fetch DZ multicast groups and publisher lists via Malbec API."""
         logger.info("📡 Fetching DZ multicast...")
-        # DZ doesn't exist on Alpenglow community cluster — skip.
-        if self.cluster == "alpenglow-community":
-            logger.info("  ⏭️  DZ multicast skipped (not available on alpenglow-community)")
+        if self.cluster not in DZ_CLUSTER_ENV:
+            logger.info("  ⏭️  DZ multicast skipped (no DZ environment for this cluster)")
             return
-        dz_env = {"mainnet-beta":"mainnet-beta","testnet":"testnet","devnet":"devnet"}.get(self.cluster, "mainnet-beta")
+        dz_env = DZ_CLUSTER_ENV.get(self.cluster, "mainnet-beta")
+        env_q = f"?env={dz_env}" if dz_env != "mainnet-beta" else ""
         try:
             # === GROUPS ===
             groups = self.api_cache.get("dz_multicast", dz_env, API_TTL["dz_multicast"])
@@ -2108,10 +2210,14 @@ class SolanaNetworkAnalyzer:
                 logger.info("  📦 DZ multicast from cache")
             else:
                 # Try Malbec API first
-                api_groups = _fetch_malbec_single("multicast-groups", timeout=MALBEC_API_TIMEOUT)
+                api_groups = _fetch_malbec_single("multicast-groups" + env_q, timeout=MALBEC_API_TIMEOUT)
                 if api_groups and isinstance(api_groups, list):
                     groups = api_groups
                     self.dz_malbec_available = True
+                elif self.api_cache.get("dz_multicast", dz_env, 10**9) is not None:
+                    groups = self.api_cache.get("dz_multicast", dz_env, 10**9)  # v3.13 step 4: last good answer
+                    logger.warning("  ♻️  Malbec down, using the last good multicast groups answer")
+                    self._dz_source_mark("malbec-stale", self.api_cache.fetched_at("dz_multicast", dz_env))
                 else:
                     # CLI fallback
                     try:
@@ -2152,7 +2258,8 @@ class SolanaNetworkAnalyzer:
                 pk = g.get("pk", g.get("account", ""))
                 if not pk: return code, []
                 members = _fetch_malbec_single(
-                    f"multicast-groups/{pk}/members?tab=publishers&limit=1000")
+                    f"multicast-groups/{pk}/members?tab=publishers&limit=1000"
+                    + (f"&env={DZ_CLUSTER_ENV.get(self.cluster, 'mainnet-beta')}" if DZ_CLUSTER_ENV.get(self.cluster, "mainnet-beta") != "mainnet-beta" else ""))
                 if members and "items" in members:
                     return code, members["items"]
                 return code, None  # None = fetch failed, [] = empty but successful
@@ -2727,7 +2834,10 @@ class SolanaNetworkAnalyzer:
                         and e.get("method") == "jip25" and e.get("first_checked_epoch") != cur):
                     pending.append(vote)
                 continue
-            if e is not None and self.cluster != "mainnet-beta":
+            if e is not None and e.get("count") is None and e.get("hdr_epoch") == cur:
+                entries[vote] = e; cached += 1  # v3.13 step 4: "no data" marker, retry next epoch
+                continue
+            if e is not None and e.get("count") is not None and self.cluster != "mainnet-beta":
                 if not rpc_ok:
                     entries[vote] = e; cached += 1  # keep the stale value, no vote data this cycle
                     continue
@@ -2755,11 +2865,19 @@ class SolanaNetworkAnalyzer:
             if not e or e.get("count") is None:
                 continue  # nothing known, or a v3.13b1 "no data this epoch" marker
             r = by_vote[vote]
-            r.first_seen_epoch = e.get("first"); r.age_epochs = e.get("count")
+            count = e.get("count")
+            # v3.13 step 4: a count above the epoch span is a data duplicate; clamp
+            if count is not None and e.get("first") is not None and e.get("as_of") is not None:
+                span = int(e["as_of"]) - int(e["first"]) + 1
+                if count > span:
+                    clamped = getattr(self, "_age_clamped", 0) + 1; self._age_clamped = clamped
+                    count = span
+            r.first_seen_epoch = e.get("first"); r.age_epochs = count
             r.age_as_of_epoch = e.get("as_of"); r.age_method = e.get("method")
             r.age_sources = list(e.get("sources") or []); have += 1
         logger.info(f"🎂 Validator age: {have}/{len(vals)} known ({cached} current, {advanced} advanced, "
-                    f"{fetched} fetched, {errors} errors, {deferred} deferred, {time.monotonic() - t0:.1f}s)")
+                    f"{fetched} fetched, {errors} errors, {deferred} deferred, "
+                    f"{getattr(self, '_age_clamped', 0)} clamped, {time.monotonic() - t0:.1f}s)")
 
     def _age_store(self, entries, chain, vote, e):
         entries[vote] = e
@@ -2848,6 +2966,8 @@ class SolanaNetworkAnalyzer:
             res = vage.history_age(rows, cur)
             if res is None:
                 need_vote_state.append(vote); continue
+            if res.get("count") == 0 and res.get("first") is None:
+                need_vote_state.append(vote); continue  # v3.13 step 4: svt.one knows nothing useful
             self._age_store(entries, chain, vote, res); fetched += 1
         if need_vote_state:
             f, er, d = self._age_vote_state(need_vote_state, entries, done, cur, chain, budget_left)
@@ -2886,6 +3006,99 @@ class SolanaNetworkAnalyzer:
                             res["sources"].append(s)
                 self._age_store(entries, chain, vote, res); fetched += 1
         return fetched, errors, deferred
+
+    def _attach_pool_ranks(self):
+        """v3.13 step 3: pool ranks and pool stake from pools_cache.json (mainnet).
+
+        The cache is written by automation/pools_fetch.py every 30 minutes.
+        A validator gets an entry for a pool only when it is ranked there or
+        the pool's on-chain ValidatorList holds stake for it; pool_ranks is {}
+        when it is in no pool, and stays null when the cache is missing or
+        unreadable (then metrics.pools is null too). Non-critical.
+        """
+        self.pools_meta = None
+        if self.cluster != "mainnet-beta":
+            return
+        if not self.data_dir:
+            logger.warning("⚠️  pools: no --data-dir, pool_ranks stay null")
+            return
+        path = os.path.join(self.data_dir, POOLS_CACHE_FILE)
+        try:
+            with open(path) as f:
+                cache = json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"⚠️  pools: {path} missing (pools_fetch.py has not run yet); pool_ranks stay null")
+            return
+        except Exception as e:
+            logger.warning(f"⚠️  pools: cache unreadable ({e}); pool_ranks stay null")
+            return
+        pools = cache.get("pools") or {}
+        stake = cache.get("stake") or {}
+        gen = cache.get("generated")
+        age_s = None
+        try:
+            age_s = int((datetime.now(timezone.utc) - datetime.fromisoformat(gen)).total_seconds())
+        except Exception:
+            pass
+        stale = age_s is None or age_s > POOLS_CACHE_MAX_AGE_S
+        counts = Counter()
+        age_diff = []
+        for r in self.records:
+            if not (r.is_validator and r.vote_account):
+                continue
+            out = {}
+            for pool in POOL_KEYS:
+                p = pools.get(pool) or {}
+                e = (p.get("ranked") or {}).get(r.vote_account)
+                s = ((stake.get(POOL_STAKE_KEY[pool]) or {}).get("entries") or {}).get(r.vote_account)
+                has_stake = bool(s and (float(s.get("active_sol") or 0) + float(s.get("transient_sol") or 0)) > 0)
+                if not e and not has_stake:
+                    continue
+                d = {"rank": e.get("rank") if e else None,
+                     "score": e.get("score") if e else None,
+                     "has_stake": has_stake,
+                     "stake_sol": round(float(s.get("active_sol") or 0), 2) if s else 0,
+                     "source_epoch": p.get("source_epoch"),
+                     "updated": p.get("updated")}
+                if pool == "jito" and e:
+                    d["eligible"] = e.get("eligible")
+                    d["failed"] = [k[:-6] if k.endswith("_score") else k
+                                   for k, v in (e.get("components") or {}).items() if v == 0]
+                    d["validator_age"] = e.get("validator_age")
+                elif pool == "shinobi" and e:
+                    d["in_pool"] = e.get("in_pool"); d["pool_rank"] = e.get("pool_rank")
+                    d["noneligibility"] = e.get("noneligibility") or []
+                elif pool == "solstrategies" and e:
+                    d["location_penalty"] = e.get("location_penalty"); d["components"] = e.get("components")
+                elif pool == "jpool_perf" and e:
+                    d["has_perf_stake"] = bool(e.get("has_perf_stake")); d["perf_stake_sol"] = e.get("perf_stake_sol") or 0  # v3.13 step 4
+                out[pool] = d
+                counts[pool] += 1
+            r.pool_ranks = out
+            ja = (out.get("jito") or {}).get("validator_age")
+            if ja is not None and r.age_epochs is not None and r.age_as_of_epoch is not None:
+                # v3.13 step 4: Jito's number is complete to source_epoch - 1; a
+                # validator that voted every epoch since then is ahead by that gap
+                jito_as_of = (pools.get("jito") or {}).get("source_epoch")
+                gap = (int(r.age_as_of_epoch) - (int(jito_as_of) - 1)) if jito_as_of else 0
+                age_diff.append((r.age_epochs - ja) - gap)
+        meta = {}
+        for pool in POOL_KEYS:
+            p = pools.get(pool) or {}
+            sm = (stake.get(POOL_STAKE_KEY[pool]) or {}).get("meta") or {}
+            meta[pool] = {"total_ranked": p.get("total_ranked"), "eligible": p.get("eligible"),
+                          "places": p.get("places"),                    # v3.13 step 4: how many the pool funds now
+                          "cutoff_score": p.get("cutoff_score"),        # v3.13 step 4: xSHIN lowest score in the pool
+                          "source_epoch": p.get("source_epoch"), "updated": p.get("updated"),
+                          "error": p.get("error"), "pool_stake_sol": sm.get("total_active_sol"),
+                          "validators_with_stake": sm.get("with_stake"), "matched": counts[pool]}
+            if pool == "jito" and p.get("steward"):
+                meta[pool]["steward"] = {k: v for k, v in p["steward"].items() if k != "updated"}
+        self.pools_meta = {"cache_generated": gen, "cache_age_s": age_s, "stale": stale, "pools": meta}
+        far = sum(1 for d in age_diff if abs(d) > 3)
+        logger.info("🏊 Pool ranks: " + ", ".join(f"{k} {counts[k]}" for k in POOL_KEYS)
+                    + f"; cache {age_s}s old{' (STALE)' if stale else ''}; age vs Jito: {len(age_diff)} compared, "
+                    f"{far} differ by more than 3 epochs")
 
     def _canonicalize_asn_names(self):
         """v3.11: one display name per ASN for the whole run, plus provider.
@@ -3822,6 +4035,8 @@ class SolanaNetworkAnalyzer:
             "other": dict(Counter(r.role for r in dz_all
                 if not r.is_validator and not r.is_rpc and not r.is_dz_device).most_common()),
             "multicast_groups": mc_groups if mc_groups else [],
+            "source": getattr(self, "dz_source", None),          # v3.13 step 4: malbec | malbec-stale | cli
+            "source_age_s": getattr(self, "dz_source_age_s", None),
         }
         if dz_contribs: dz_metrics["contributors"] = dz_contribs
         if self.dz_network_health: dz_metrics["network_health"] = self.dz_network_health
@@ -3838,6 +4053,7 @@ class SolanaNetworkAnalyzer:
             "validators": self._val_metrics(online_val, all_val),
             "rpc": self._cat_metrics(rpc),
             "endpoints": ep_metrics,
+            "pools": self.pools_meta,  # v3.13 step 3 (mainnet; null without a cache)
             "doublezero": dz_metrics,
             "bam": self._bam_metrics(all_val),
             "rakurai": self._rakurai_metrics(all_val),
@@ -4222,6 +4438,7 @@ class SolanaNetworkAnalyzer:
                 "age_as_of_epoch": rec.age_as_of_epoch,                  # v3.13 step 2
                 "age_method": rec.age_method,                            # v3.13 step 2
                 "age_sources": rec.age_sources,                          # v3.13 step 2
+                "pool_ranks": rec.pool_ranks,                            # v3.13 step 3 (mainnet; {} = in no pool)
                 "mev_commission": rec.mev_commission,
                 "is_sfdp": rec.is_sfdp,
                 "sfdp_state": rec.sfdp_state,

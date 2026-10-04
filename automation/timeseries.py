@@ -1181,12 +1181,19 @@ class TimeSeries:
                 fd_stake += r.get("stake_percentage") or 0
         current["firedancer_stake_percent"] = round(fd_stake, 2)
 
+        # v6.9.4 (SONDA_PATCH_v6_9_4): DZ thresholds only on fresh Malbec data
+        dz_source = dz_m.get("source")
+        dz_fresh = dz_source in (None, "malbec")
+
         with self._conn() as c:
             for metric, thresholds in MILESTONE_THRESHOLDS.items():
                 if not thresholds:
                     continue
                 val = current.get(metric)
                 if val is None:
+                    continue
+                if metric == "dz_stake_percent" and not dz_fresh:
+                    logger.warning(f"milestones: DZ source is {dz_source}, dz_stake_percent {val} not evaluated")
                     continue
 
                 # Load previous state for this metric

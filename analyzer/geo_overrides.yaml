@@ -27,10 +27,6 @@ overrides:
   city: Seattle
   source: doublezero-verified
   dz_device_name: dz-sea10-sw01
-- ip: 137.239.200.186
-  city: Washington DC
-  source: doublezero-verified
-  dz_device_name: dz-dc10-sw01
 - ip: 137.239.202.82
   city: London
   source: doublezero-verified
@@ -231,18 +227,10 @@ overrides:
   city: Chicago
   source: doublezero-verified
   dz_device_name: chi001-dz001
-- ip: 38.121.232.26
-  city: Salt Lake City
-  source: doublezero-verified
-  dz_device_name: dz-slc-sw01
 - ip: 38.121.232.34
   city: Los Angeles
   source: doublezero-verified
   dz_device_name: dz-lax-sw01
-- ip: 38.122.188.191
-  city: Chicago
-  source: doublezero-verified
-  dz_device_name: dz-chi-sw01
 - ip: 38.122.35.137
   city: New York
   source: doublezero-verified

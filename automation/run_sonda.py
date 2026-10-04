@@ -77,6 +77,8 @@ DAILY_SUMMARY_HOUR = 9          # 09:00 UTC
 BACKUP_HOUR = 3                 # 03:00 UTC
 PRUNE_HOUR = 4                  # 04:00 UTC Sunday
 WAL_CHECKPOINT_INTERVAL = 3600  # Every 1 hour
+POOLS_INTERVAL = 1800           # v6.9.3 (SONDA_PATCH_v6_9_3): pools_fetch.py every 30 min
+POOLS_TIMEOUT = 300
 
 BACKUP_RETENTION_DAYS = 7       # How long to keep local backups
 PRUNE_DATA_KEEP_DAYS = 0        # 0 = never prune. SONDA is an accumulating archive (CHARTER).
@@ -637,6 +639,26 @@ class Maintenance:
                 self._save_state()
             except Exception as e:
                 logger.warning(f"dc_logos failed: {e}")
+
+        # v6.9.3: performance pool ranks and on-chain pool stake into
+        # sonda_data/pools_cache.json (pools_fetch.py), every POOLS_INTERVAL,
+        # first run right after start. The mainnet analyzer reads the file
+        # on every cycle; a failed run only leaves the previous cache.
+        if time.time() - float(self.state.get("last_pools_ts") or 0) >= POOLS_INTERVAL:
+            self.state["last_pools_ts"] = time.time()
+            self._save_state()
+            try:
+                paths = self.config.get("paths") or {}
+                script = Path(paths["automation_dir"]) / "pools_fetch.py"
+                if script.exists():
+                    r = subprocess.run([sys.executable, str(script), "--config", self.config["_config_path"]],
+                                       capture_output=True, timeout=POOLS_TIMEOUT, text=True)
+                    tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+                    logger.info(f"🏊 pools_fetch rc={r.returncode}: {tail[0][:200]}")
+                else:
+                    logger.warning(f"pools_fetch.py not found at {script}")
+            except Exception as e:
+                logger.warning(f"pools_fetch failed: {e}")
 
         # Hourly WAL checkpoint (prevent WAL file from growing indefinitely)
         if time.monotonic() - self.last_wal_checkpoint > WAL_CHECKPOINT_INTERVAL:

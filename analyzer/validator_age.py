@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-validator_age.py - validator age for SONDA (v1.0, 2026-09-24)
+validator_age.py - validator age for SONDA (v1.1, 2026-10-05)
 
 Age = number of epochs in which a vote account earned non-zero vote credits.
 This is the Jito JIP-25 definition, and on mainnet the number itself is read
@@ -25,7 +25,11 @@ Sources, in the order the analyzer uses them:
             when the header is not initialised; oracle CSV / ring for the
             first epoch with credits
   testnet   svt.one validators-history (method "history"), then our own
-            per-epoch increments from getVoteAccounts
+            per-epoch increments from getVoteAccounts. svt.one keeps timely
+            vote credits only from epoch 716, so older rows count as active
+            when they show rewards or leader slots. Its data starts at epoch
+            342 for everyone; a validator whose first row sits at that edge
+            gets method "lower_bound" (v1.1)
   devnet, alpenglow  vote state epochCredits (up to 64 epochs) and our own
             increments: a floor, method "lower_bound"
 
@@ -65,6 +69,10 @@ U32_MAX = 4294967295
 RPC_EPOCH_CREDITS_CAP = 5
 # The vote state itself keeps at most this many epochs (jsonParsed account).
 VOTE_STATE_EPOCH_CREDITS_CAP = 64
+# svt.one testnet history begins at epoch 342 for every validator (checked
+# 2026-10-04); a first row at or below this edge is the data floor, not the
+# validator's first epoch.
+SVT_TESTNET_FLOOR_EPOCH = 345
 
 SVT_HISTORY_URL = ("https://api.validators.svt.one/validators-history/history"
                    "?network={network}&identity={identity}&epoch_count=2000")
@@ -300,7 +308,7 @@ def jip25_age(header, ring_rows, oracle_entry, current_epoch):
 def epochs_from_epoch_credits(entries):
     """[(epoch, earned)] from getVoteAccounts [[epoch, credits, prev], ...] or
     from jsonParsed [{"epoch", "credits", "previousCredits"}, ...]."""
-    out = []
+    best = {}
     for e in entries or []:
         try:
             if isinstance(e, dict):
@@ -309,30 +317,41 @@ def epochs_from_epoch_credits(entries):
                 ep = int(e[0]); cr = int(e[1]); pr = int(e[2])
         except (KeyError, IndexError, ValueError, TypeError):
             continue
-        out.append((ep, max(0, cr - pr)))
-    out.sort()
-    return out
+        earned = max(0, cr - pr)
+        # v1.1: devnet vote states were seen with the same epoch twice; keep one
+        if ep not in best or earned > best[ep]:
+            best[ep] = earned
+    return sorted(best.items())
 
 
 def lower_bound_age(entries, current_epoch, cap=VOTE_STATE_EPOCH_CREDITS_CAP):
     """Floor from a vote state's epochCredits: dict(count, as_of, first,
     method, sources) or None when the list is empty."""
     done = current_epoch - 1
-    nz = [ep for ep, earned in entries if earned > 0 and ep <= done]
+    nz = sorted({ep for ep, earned in entries if earned > 0 and ep <= done})
     if not entries:
         return None
     return {"count": len(nz), "as_of": done, "first": nz[0] if nz else None,
             "method": "lower_bound", "sources": ["vote_state"]}
 
 
-def history_age(rows, current_epoch):
-    """From a full per-epoch credit history [(epoch, credits)] (svt.one)."""
+def history_age(rows, current_epoch, floor_epoch=SVT_TESTNET_FLOOR_EPOCH):
+    """From svt.one per-epoch rows as returned by fetch_svt_history:
+    [(epoch, active, present)]. active = the validator earned something that
+    epoch (credits, rewards or leader slots); present = it was in the set with
+    stake. count = distinct active epochs up to the last completed one;
+    first = first present epoch. When the first row sits at svt.one's data
+    edge (floor_epoch) the history is cut, so the method is "lower_bound"."""
     done = current_epoch - 1
-    nz = sorted(ep for ep, cr in rows if cr and cr > 0 and ep <= done)
     if not rows:
         return None
-    return {"count": len(nz), "as_of": done, "first": nz[0] if nz else None,
-            "method": "history", "sources": ["svt_one"]}
+    active = sorted({ep for ep, act, _pres in rows if act and ep <= done})
+    present = sorted({ep for ep, act, pres in rows if (act or pres) and ep <= done})
+    first_row = min(ep for ep, _a, _p in rows)
+    cut = floor_epoch is not None and first_row <= floor_epoch
+    return {"count": len(active), "as_of": done, "first": present[0] if present else None,
+            "method": "lower_bound" if cut else "history", "sources": ["svt_one"],
+            "svt_first_row": first_row}
 
 
 def advance_ledger(entry, vote_entries, done, cap=RPC_EPOCH_CREDITS_CAP):
@@ -341,6 +360,8 @@ def advance_ledger(entry, vote_entries, done, cap=RPC_EPOCH_CREDITS_CAP):
     the same entry when nothing is missing, or None when the list does not
     cover the gap (older than its earliest listed epoch)."""
     as_of = entry.get("as_of")
+    if entry.get("count") is None:
+        return None  # v1.1: a "no data" marker must be re-bootstrapped, not advanced
     if as_of is None or as_of >= done:
         return entry
     if not vote_entries:
@@ -423,8 +444,33 @@ def fetch_vote_states(url, votes, timeout=60):
     return out
 
 
+def _num(v):
+    try:
+        return float(v or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def svt_rows_to_history(rows):
+    """svt.one rows (dicts) -> sorted [(epoch, active, present)], one per epoch.
+    active: tvCredits, votingReward, commissionReward or leaderSlotsDone > 0;
+    present: active or totalStake > 0. Numbers arrive as strings."""
+    by_epoch = {}
+    for row in rows or []:
+        try:
+            ep = int(row["epoch"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        active = (_num(row.get("tvCredits")) > 0 or _num(row.get("votingReward")) > 0
+                  or _num(row.get("commissionReward")) > 0 or _num(row.get("leaderSlotsDone")) > 0)
+        present = active or _num(row.get("totalStake")) > 0
+        a, p = by_epoch.get(ep, (False, False))
+        by_epoch[ep] = (a or active, p or present)
+    return sorted((ep, a, p) for ep, (a, p) in by_epoch.items())
+
+
 def fetch_svt_history(identity, network="testnet", timeout=15):
-    """[(epoch, tvCredits)] from svt.one, None on any error."""
+    """Sorted [(epoch, active, present)] from svt.one, None on any error."""
     import requests
     try:
         r = requests.get(SVT_HISTORY_URL.format(network=network, identity=identity), timeout=timeout)
@@ -432,14 +478,7 @@ def fetch_svt_history(identity, network="testnet", timeout=15):
             return None
         d = r.json()
         rows = d.get("data") if isinstance(d, dict) else d
-        out = []
-        for row in rows or []:
-            try:
-                out.append((int(row["epoch"]), int(row.get("tvCredits") or 0)))
-            except (KeyError, ValueError, TypeError):
-                continue
-        out.sort()
-        return out
+        return svt_rows_to_history(rows)
     except Exception:
         return None
 
