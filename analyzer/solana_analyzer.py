@@ -2,6 +2,25 @@
 """
 Solana Network Decentralization Analyzer v3.13
 ==============================================
+Changes in v3.13 step 5 follow-up (2026-10-09; patch marker SONDA_PATCH_v3_13e1):
+- Malbec paginated lists are read up to 200 pages (20 000 items) instead of
+  20 pages: the DZ mainnet user list passed 2000 users and the newest ones
+  (the alpenglow-test tenant among them) were silently dropped. A warning is
+  logged when the cap is hit.
+
+Changes in v3.13 step 5 (2026-10-09; patch marker SONDA_PATCH_v3_13e):
+- DoubleZero users are matched with a per-cluster policy: alpenglow-community
+  by owner == identity (alpenglow nodes use their alpenglow identity as
+  DoubleZero ID) or by the alpenglow-test tenant on the record's IP, never by
+  a bare IP match against mainnet users; mainnet-beta ignores alpenglow-test
+  users; multicast publishers on alpenglow only by node pubkey. Tenants come
+  from the CLI rows or from a cached `doublezero user list --json` map.
+  record.dz_tenant, metrics.doublezero.matching.
+- Age: a vote account that exists but never earned credits is age 0
+  (lower_bound), not "no data" (validator_age.py v1.2).
+- metrics.chain.slot_time_ms_typical (24 h median of our own samples),
+  slot_time_ms_typical_samples, slot_time_ms_typical_window_h.
+
 Changes in v3.13 step 4 follow-up (2026-10-05; patch marker SONDA_PATCH_v3_13d1):
 - Multicast publishers are mapped onto records even while Malbec is down (last
   good publisher lists plus the groups listed by the CLI); publishers cache
@@ -562,6 +581,7 @@ class NodeInfo:
     dz_multicast_publisher: Optional[bool] = None   # True if publishing shreds
     dz_multicast_groups: Optional[List[str]] = None  # ["bebop", "corvus"]
     dz_metro_code: Optional[str] = None             # "fra", "sao", "nyc"
+    dz_tenant: Optional[str] = None                 # v3.13e: DZ tenant of the matched user ("solana", "alpenglow-test", ...)
     dz_contributor: Optional[str] = None            # device contributor (for dz-device role)
     # BAM (Jito Block Auction Marketplace)
     bam_node: Optional[str] = None
@@ -690,9 +710,11 @@ def parse_ip_port(value):
     return value, None
 
 
-def _fetch_malbec_paginated(path, params=None, max_pages=20):
+def _fetch_malbec_paginated(path, params=None, max_pages=200):
     """Fetch all pages from Malbec API (data.malbeclabs.com) with per-page retries.
-    Returns list of items or None on failure."""
+    Returns list of items or None on failure. v3.13e1: 200 pages of
+    MALBEC_PAGE_SIZE (20 000 items); the old cap of 20 pages truncated the
+    mainnet user list once it passed 2000 users."""
     all_items = []
     offset = 0
     for page in range(max_pages):
@@ -728,6 +750,7 @@ def _fetch_malbec_paginated(path, params=None, max_pages=20):
         if not page_ok:
             logger.warning(f"  ⚠️  Malbec API error for {path} page {page} (after {MALBEC_API_RETRIES} retries): {last_error}")
             return None
+    logger.warning(f"  ⚠️  Malbec API: {path} has more than {max_pages * MALBEC_PAGE_SIZE} items, list truncated")  # v3.13e1
     return all_items
 
 
@@ -910,6 +933,13 @@ POOL_STAKE_KEY = {"jito": "jito", "shinobi": "shinobi", "solstrategies": "solstr
 # Alpenglow validators join the DZ mainnet environment with their alpenglow
 # identity (DZ team in #ag-community-cluster, 2026-10-04); devnet DZ is a lab.
 DZ_CLUSTER_ENV = {"mainnet-beta": "mainnet-beta", "testnet": "testnet", "alpenglow-community": "mainnet-beta"}
+# v3.13e: alpenglow nodes get their DZ access pass from the DZ Foundation under
+# this tenant; a user of this tenant never belongs to a mainnet validator.
+DZ_ALPENGLOW_TENANT = "alpenglow-test"
+DZ_TENANT_MAP_TTL_S = 3600          # `doublezero user list --json` map (tenant, owner per user account)
+# v3.13e: typical slot time = median of our own slot_time_ms samples
+CHAIN_TYPICAL_WINDOW_S = 24 * 3600
+CHAIN_TYPICAL_MIN_SAMPLES = 10
 
 # Trillium "Name (N)" → SONDA canonical mapping. When Trillium is used as a
 # fallback (e.g. if RPC didn't provide clientId for a validator), strip the
@@ -1161,12 +1191,26 @@ def _dz_normalize_users(users):
         if not isinstance(u, dict):
             continue
         if "kind" in u or "user_type" not in u:
-            out.append(u); continue
+            # v3.13e: Malbec row; expose tenant and owner under one name when present
+            v = dict(u)
+            t = u.get("tenant") or u.get("tenant_code") or u.get("tenant_name")
+            if t:
+                v["tenant"] = t
+            elif "tenant" in v and not v["tenant"]:
+                del v["tenant"]  # empty = unknown, the CLI map may fill it
+            own = u.get("owner_pubkey") or u.get("owner")
+            if own:
+                v["owner_pubkey"] = own
+            out.append(v); continue
         v = dict(u)
         v["kind"] = str(u.get("user_type") or "").lower()
         v.setdefault("device_code", u.get("device_name", ""))
         v.setdefault("metro_code", u.get("location_code", ""))
         v.setdefault("metro_name", u.get("location_name", ""))
+        v["tenant"] = (u.get("tenant") or "").strip() or None   # v3.13e: known, possibly empty
+        own = u.get("owner") or u.get("owner_pubkey") or u.get("owner_pk") or u.get("user_payer")
+        if own:
+            v["owner_pubkey"] = own
         pubs = u.get("publishers") or ""
         if isinstance(pubs, str):
             pubs = [p.strip() for p in pubs.split(",") if p.strip()]
@@ -2082,6 +2126,7 @@ class SolanaNetworkAnalyzer:
         malbec_params = {"env": dz_env} if dz_env != "mainnet-beta" else None
         env_q = f"&env={dz_env}" if dz_env != "mainnet-beta" else ""
         self.dz_source = None; self.dz_source_age_s = None
+        self.dz_match_stats = None  # v3.13e: metrics.doublezero.matching
 
         # === METROS (map metro_code → metro_name, needed for devices API) ===
         metro_names = {}  # code -> name
@@ -2134,58 +2179,7 @@ class SolanaNetworkAnalyzer:
 
         if users:
             logger.info(f"✅ {len(users)} DZ users")
-            # Build IP → connection types map
-            ip_kinds = defaultdict(set)   # client_ip -> {"ibrl", "multicast"}
-            ip_device = {}                # client_ip -> device_code
-            ip_metro = {}                 # client_ip -> (metro_code, metro_name)
-            for u in users:
-                cip = u.get("client_ip")
-                if not cip: continue
-                kind = u.get("kind", "")
-                if kind: ip_kinds[cip].add(kind)
-                if cip not in ip_device:
-                    ip_device[cip] = u.get("device_code", u.get("device_name", ""))
-                    mc = u.get("metro_code", "")
-                    mn = u.get("metro_name") or metro_names.get(mc, "") or u.get("location_name", "")
-                    ip_metro[cip] = (mc, mn)
-                # Old-style CLI fallback: accesspass regex
-                if not kind and u.get("accesspass"):
-                    m = re.search(r'SolanaValidator: \(([^)]+)\)', u.get("accesspass", ""))
-                    if m:
-                        for rec in self.records:
-                            if rec.identity_pubkey == m.group(1):
-                                rec.dz_connected = True
-                                rec.dz_device_name = rec.dz_device_name or u.get("device_name", "")
-                                rec.dz_location = rec.dz_location or u.get("location_name", "")
-
-            # v3.13 step 4: when Malbec is down the CLI rows carry the groups a
-            # user publishes to; keep them so dz_multicast_publisher survives
-            if not self.dz_malbec_available:
-                for u in users:
-                    for code in u.get("_cli_publishers") or []:
-                        cip = u.get("client_ip")
-                        if cip:
-                            self.dz_publishers_by_ip.setdefault(cip, [])
-                            if code not in self.dz_publishers_by_ip[cip]:
-                                self.dz_publishers_by_ip[cip].append(code)
-
-            # Map users to validator records by client_ip
-            for rec in self.records:
-                if not rec.ip_address or rec.is_dz_device: continue
-                if rec.ip_address in ip_kinds:
-                    rec.dz_connected = True
-                    kinds = ip_kinds[rec.ip_address]
-                    if "ibrl" in kinds and "multicast" in kinds:
-                        rec.dz_connection_type = "ibrl+multicast"
-                    elif "multicast" in kinds:
-                        rec.dz_connection_type = "multicast"
-                    elif "ibrl" in kinds:
-                        rec.dz_connection_type = "ibrl"
-                    if not rec.dz_device_name:
-                        rec.dz_device_name = ip_device.get(rec.ip_address, "")
-                    metro = ip_metro.get(rec.ip_address, ("", ""))
-                    if not rec.dz_location: rec.dz_location = metro[1]
-                    if not rec.dz_metro_code: rec.dz_metro_code = metro[0]
+            self._dz_match_users(users, metro_names, dz_env)  # v3.13e: per-cluster policy
 
         # === Auto-generate geo overrides from DZ devices ===
         # v3.13 step 4: only the mainnet run writes them (testnet devices are a
@@ -2199,6 +2193,159 @@ class SolanaNetworkAnalyzer:
             save_geo_overrides(self.geo_overrides_path, merged)
             self.geo_overrides = merged
             logger.info(f"  🗺️  Geo overrides: {len(dz_overrides)} DZ + {len(admin_entries)} admin")
+
+    def _dz_tenant_map(self, dz_env):
+        """v3.13e: {user account: {tenant, owner, client_ip, kind}} from
+        `doublezero user list --json`, cached for DZ_TENANT_MAP_TTL_S per DZ
+        environment. Used when the Malbec rows carry no tenant. {} when the
+        CLI is unavailable (then tenants stay unknown)."""
+        cached = self.api_cache.get("dz_tenants", dz_env, DZ_TENANT_MAP_TTL_S)
+        if cached is not None:
+            return cached
+        tmap = {}
+        try:
+            r = subprocess.run(["doublezero", "--env", dz_env, "user", "list", "--json"],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                for u in json.loads(r.stdout) or []:
+                    if not isinstance(u, dict):
+                        continue
+                    acc = u.get("account") or u.get("pk")
+                    if acc:
+                        tmap[acc] = {"tenant": (u.get("tenant") or "").strip() or None,
+                                     "owner": u.get("owner") or u.get("owner_pubkey") or u.get("owner_pk") or u.get("user_payer") or None,
+                                     "client_ip": u.get("client_ip"),
+                                     "kind": str(u.get("user_type") or "").lower()}
+                self.api_cache.set("dz_tenants", dz_env, tmap)
+                logger.info(f"  🏷  DZ tenant map from CLI: {len(tmap)} users")
+            else:
+                logger.warning(f"  ⚠️  DZ tenant map: CLI rc={r.returncode}")
+        except FileNotFoundError:
+            logger.warning("  ⚠️  DZ tenant map: doublezero CLI not found")
+        except Exception as e:
+            logger.warning(f"  ⚠️  DZ tenant map: {e}")
+        return tmap
+
+    def _dz_match_users(self, users, metro_names, dz_env):
+        """v3.13e: map DZ users onto records with a per-cluster policy.
+
+        mainnet-beta and testnet match by client_ip as before; mainnet ignores
+        users of the alpenglow-test tenant (an alpenglow node on the same
+        machine is not this validator's connection).
+        alpenglow-community: alpenglow nodes join DZ mainnet with their
+        alpenglow identity as DoubleZero ID, so a user counts only when its
+        owner is the record's identity, or when it belongs to the
+        alpenglow-test tenant and sits on the record's IP. Users of other
+        tenants on the same IP (a mainnet validator's connection) are ignored.
+        Tenants come from the rows (CLI) or from the cached CLI map.
+        """
+        policy = "owner" if self.cluster == "alpenglow-community" else "ip"
+        stats = {"policy": policy, "users": len(users), "tenant_source": None,
+                 "by_ip": 0, "by_owner": 0, "excluded_tenant": 0, "tenant_unknown": 0}
+        if self.cluster in ("mainnet-beta", "alpenglow-community"):
+            missing = [u for u in users if "tenant" not in u]
+            if not missing:
+                stats["tenant_source"] = "rows"
+            else:
+                tmap = self._dz_tenant_map(dz_env)
+                if tmap:
+                    by_ipkind = {(t.get("client_ip"), t.get("kind")): t for t in tmap.values() if t.get("client_ip")}
+                    hit = 0
+                    for u in missing:
+                        t = tmap.get(u.get("pk") or u.get("account") or "")
+                        if t is None:
+                            t = by_ipkind.get((u.get("client_ip"), str(u.get("kind") or "").lower()))
+                        if t:
+                            u["tenant"] = t.get("tenant")
+                            if not u.get("owner_pubkey") and t.get("owner"):
+                                u["owner_pubkey"] = t["owner"]
+                            hit += 1
+                    stats["tenant_source"] = "cli" if hit else None
+                    stats["tenant_map_hits"] = hit
+        by_ip = defaultdict(list)
+        by_owner = defaultdict(list)
+        for u in users:
+            tenant = u.get("tenant") or None
+            if self.cluster == "mainnet-beta" and tenant == DZ_ALPENGLOW_TENANT:
+                stats["excluded_tenant"] += 1; continue
+            if tenant is None:
+                stats["tenant_unknown"] += 1
+            cip = u.get("client_ip")
+            if cip:
+                by_ip[cip].append(u)
+            owner = u.get("owner_pubkey")
+            if owner:
+                by_owner[owner].append(u)
+            # Old-style CLI fallback (no user_type column): accesspass regex
+            if not u.get("kind") and u.get("accesspass"):
+                m = re.search(r'SolanaValidator: \(([^)]+)\)', u.get("accesspass", ""))
+                if m:
+                    for rec in self.records:
+                        if rec.identity_pubkey == m.group(1):
+                            rec.dz_connected = True
+                            rec.dz_device_name = rec.dz_device_name or u.get("device_name", "")
+                            rec.dz_location = rec.dz_location or u.get("location_name", "")
+
+        # v3.13 step 4: when Malbec is down the CLI rows carry the groups a user
+        # publishes to; keep them so dz_multicast_publisher survives. v3.13e:
+        # same tenant policy; on alpenglow keyed by owner (node pubkey), not IP.
+        if not self.dz_malbec_available:
+            for u in users:
+                codes = u.get("_cli_publishers") or []
+                if not codes:
+                    continue
+                if self.cluster == "mainnet-beta" and (u.get("tenant") or None) == DZ_ALPENGLOW_TENANT:
+                    continue
+                if policy == "owner":
+                    key, store = u.get("owner_pubkey"), self.dz_publishers_by_pubkey
+                else:
+                    key, store = u.get("client_ip"), self.dz_publishers_by_ip
+                if not key:
+                    continue
+                store.setdefault(key, [])
+                for code in codes:
+                    if code not in store[key]:
+                        store[key].append(code)
+
+        for rec in self.records:
+            if rec.is_dz_device:
+                continue
+            if policy == "owner":
+                cands = list(by_owner.get(rec.identity_pubkey, []))
+                matched_by = "owner" if cands else None
+                if rec.ip_address:
+                    for u in by_ip.get(rec.ip_address, []):
+                        if (u.get("tenant") or None) == DZ_ALPENGLOW_TENANT and u not in cands:
+                            cands.append(u); matched_by = matched_by or "ip"
+            else:
+                if not rec.ip_address:
+                    continue
+                cands = by_ip.get(rec.ip_address, [])
+                matched_by = "ip" if cands else None
+            if not cands:
+                continue
+            rec.dz_connected = True
+            kinds = {u.get("kind") for u in cands if u.get("kind")}
+            if "ibrl" in kinds and "multicast" in kinds:
+                rec.dz_connection_type = "ibrl+multicast"
+            elif "multicast" in kinds:
+                rec.dz_connection_type = "multicast"
+            elif "ibrl" in kinds:
+                rec.dz_connection_type = "ibrl"
+            first = cands[0]
+            if not rec.dz_device_name:
+                rec.dz_device_name = first.get("device_code") or first.get("device_name") or ""
+            mc = first.get("metro_code", "") or ""
+            mn = first.get("metro_name") or metro_names.get(mc, "") or first.get("location_name", "") or ""
+            if not rec.dz_location: rec.dz_location = mn
+            if not rec.dz_metro_code: rec.dz_metro_code = mc
+            tenants = sorted({u.get("tenant") for u in cands if u.get("tenant")})
+            rec.dz_tenant = tenants[0] if tenants else None
+            stats["by_" + matched_by] += 1
+        self.dz_match_stats = stats
+        logger.info(f"  🔗 DZ users matched: {stats['by_ip']} by ip, {stats['by_owner']} by owner "
+                    f"(policy {policy}, tenants from {stats['tenant_source'] or 'nowhere'}, "
+                    f"{stats['excluded_tenant']} excluded as {DZ_ALPENGLOW_TENANT}, {stats['tenant_unknown']} unknown)")
 
     def _fetch_dz_multicast(self):
         """Fetch DZ multicast groups and publisher lists via Malbec API."""
@@ -2242,7 +2389,7 @@ class SolanaNetworkAnalyzer:
             # === PUBLISHERS per active group ===
             active_groups = [g for g in self.dz_multicast_groups
                             if (g.get("publisher_count") or g.get("publishers", 0)) > 0]
-            if active_groups or self.dz_publishers_by_ip:  # v3.13d1: map publishers in every mode
+            if active_groups or self.dz_publishers_by_ip or self.dz_publishers_by_pubkey:  # v3.13d1/e: map publishers in every mode
                 self._fetch_dz_multicast_publishers(active_groups)
 
         except Exception as e:
@@ -2326,8 +2473,9 @@ class SolanaNetworkAnalyzer:
             # Match by identity pubkey (node_pubkey in publisher data)
             if rec.identity_pubkey in self.dz_publishers_by_pubkey:
                 groups.update(self.dz_publishers_by_pubkey[rec.identity_pubkey])
-            # Match by IP as fallback
-            if rec.ip_address and rec.ip_address in self.dz_publishers_by_ip:
+            # Match by IP as fallback; not on alpenglow (v3.13e): the IP's
+            # publisher is usually a mainnet validator on the same machine
+            if self.cluster != "alpenglow-community" and rec.ip_address and rec.ip_address in self.dz_publishers_by_ip:
                 groups.update(self.dz_publishers_by_ip[rec.ip_address])
             if groups:
                 rec.dz_multicast_publisher = True
@@ -3000,7 +3148,8 @@ class SolanaNetworkAnalyzer:
             except Exception as e:
                 logger.warning(f"⚠️  age: vote states: {e}"); errors += len(batch); break
             for vote, ents in states.items():
-                res = vage.lower_bound_age(ents, cur) if ents else None
+                # v3.13e: an empty list = the account exists and never earned credits = age 0
+                res = vage.lower_bound_age(ents, cur) if ents is not None else None
                 if res is None:
                     # v3.13b1: remember the miss for this epoch instead of asking again every cycle
                     old = entries.get(vote) or {}
@@ -3283,6 +3432,33 @@ class SolanaNetworkAnalyzer:
                 return key
         return None
 
+    def _chain_typical(self, slot_ms):
+        """v3.13e: typical slot time of this cluster = median of our own
+        slot_time_ms samples over the last CHAIN_TYPICAL_WINDOW_S (api_cache
+        "chain_slot_hist", one entry per cycle). Null until
+        CHAIN_TYPICAL_MIN_SAMPLES samples exist. Samples outside 50..5000 ms
+        (halted cluster or broken RPC) are not stored. Non-critical."""
+        out = {"slot_time_ms_typical": None, "slot_time_ms_typical_samples": 0,
+               "slot_time_ms_typical_window_h": CHAIN_TYPICAL_WINDOW_S // 3600}
+        try:
+            now = time.time()
+            hist = self.api_cache.get("chain_slot_hist", self.cluster, 10**9) or []
+            ok = slot_ms is not None and 50 <= float(slot_ms) <= 5000
+            if ok:
+                hist.append([int(now), round(float(slot_ms), 1)])
+            cutoff = now - CHAIN_TYPICAL_WINDOW_S
+            hist = [h for h in hist if len(h) == 2 and h[0] >= cutoff][-5000:]
+            if ok:
+                self.api_cache.set("chain_slot_hist", self.cluster, hist)
+            vals = sorted(h[1] for h in hist)
+            out["slot_time_ms_typical_samples"] = len(vals)
+            if len(vals) >= CHAIN_TYPICAL_MIN_SAMPLES:
+                mid = len(vals) // 2
+                out["slot_time_ms_typical"] = vals[mid] if len(vals) % 2 else round((vals[mid - 1] + vals[mid]) / 2, 1)
+        except Exception as e:
+            logger.warning(f"⚠️  typical slot time: {e}")
+        return out
+
     def _fetch_chain_vitals(self):
         """v3.11: metrics.chain for the homepage top cards (frontend note
         2026-09-07b). Non-critical: any failure leaves self.chain = None and
@@ -3334,6 +3510,7 @@ class SolanaNetworkAnalyzer:
                 "cu_per_block_avg": None,
                 "source": source,
             }
+            self.chain.update(self._chain_typical(self.chain["slot_time_ms"]))  # v3.13e
             logger.info(f"✅ Chain: slot {slot_c}, {self.chain['slot_time_ms']} ms/slot, "
                         f"tps {self.chain['tps']}, finality lag {lag} slots")
         except Exception as e:
@@ -3341,6 +3518,7 @@ class SolanaNetworkAnalyzer:
             self.chain = {k: None for k in ("slot", "block_height", "window_s", "slot_time_ms", "tps",
                                             "tps_non_vote", "tx_per_slot", "finality_lag_slots", "finality_ms",
                                             "cu_per_block_avg", "source")}
+            self.chain.update(self._chain_typical(None))  # v3.13e: the typical value survives a bad cycle
         # v3.12: cluster status from all RPC URLs, always present
         try:
             self.chain.update(self._chain_status())
@@ -4049,6 +4227,7 @@ class SolanaNetworkAnalyzer:
             "multicast_groups": mc_groups if mc_groups else [],
             "source": getattr(self, "dz_source", None),          # v3.13 step 4: malbec | malbec-stale | cli
             "source_age_s": getattr(self, "dz_source_age_s", None),
+            "matching": getattr(self, "dz_match_stats", None),   # v3.13e: policy and counts
         }
         if dz_contribs: dz_metrics["contributors"] = dz_contribs
         if self.dz_network_health: dz_metrics["network_health"] = self.dz_network_health
@@ -4481,6 +4660,7 @@ class SolanaNetworkAnalyzer:
                 "dz_metro_code": rec.dz_metro_code,
             }
             if rec.dz_connection_type: dz_block["dz_connection_type"] = rec.dz_connection_type
+            if rec.dz_tenant: dz_block["dz_tenant"] = rec.dz_tenant  # v3.13e
             if rec.dz_multicast_publisher: dz_block["dz_multicast_publisher"] = True
             if rec.dz_multicast_groups: dz_block["dz_multicast_groups"] = rec.dz_multicast_groups
             if rec.is_dz_device and rec.dz_contributor:

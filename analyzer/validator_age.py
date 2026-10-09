@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-validator_age.py - validator age for SONDA (v1.1, 2026-10-05)
+validator_age.py - validator age for SONDA (v1.2, 2026-10-09)
 
 Age = number of epochs in which a vote account earned non-zero vote credits.
 This is the Jito JIP-25 definition, and on mainnet the number itself is read
@@ -32,6 +32,9 @@ Sources, in the order the analyzer uses them:
             gets method "lower_bound" (v1.1)
   devnet, alpenglow  vote state epochCredits (up to 64 epochs) and our own
             increments: a floor, method "lower_bound"
+  A vote account that exists but has never earned credits (empty
+  epochCredits) is an age of 0 with method "lower_bound", not "no data";
+  only a missing account is "no data" (v1.2).
 
 No external dependencies except `requests` for the fetch helpers and the CLI.
 Base58, sha256 PDA derivation and the ed25519 on-curve test are implemented
@@ -326,11 +329,12 @@ def epochs_from_epoch_credits(entries):
 
 def lower_bound_age(entries, current_epoch, cap=VOTE_STATE_EPOCH_CREDITS_CAP):
     """Floor from a vote state's epochCredits: dict(count, as_of, first,
-    method, sources) or None when the list is empty."""
+    method, sources). An empty list (the account exists, never earned
+    credits) is a floor of 0; None (no account) returns None (v1.2)."""
+    if entries is None:
+        return None
     done = current_epoch - 1
     nz = sorted({ep for ep, earned in entries if earned > 0 and ep <= done})
-    if not entries:
-        return None
     return {"count": len(nz), "as_of": done, "first": nz[0] if nz else None,
             "method": "lower_bound", "sources": ["vote_state"]}
 
